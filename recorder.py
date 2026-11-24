@@ -1,0 +1,121 @@
+"""Binance spot raw recorder: depth diffs + trades + periodic REST snapshots.
+
+Design rule: RECORD RAW, DERIVE LATER. This script never builds an order book.
+It only appends what it received, byte-for-byte, with a local receive timestamp.
+Book reconstruction, validation and ETL happen offline on these logs, so any bug
+found later can be fixed and the data replayed.
+
+Log line format (one record per line):
+    <rx_ns> <session> <kind> <payload>
+    rx_ns   : local wall-clock receive time, nanoseconds since epoch
+    session : id of the WebSocket connection (unix seconds at connect)
+    kind    : open | ws | snap | err | close
+    payload : exchange JSON, untouched (empty for 'close')
+"""
+import argparse
+import asyncio
+import contextlib
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+import aiohttp
+import websockets
+
+WS_URL = "wss://stream.binance.com:9443/stream?streams={s}@depth@100ms/{s}@trade"
+REST_URL = "https://api.binance.com/api/v3/depth"
+SNAPSHOT_LIMIT = 5000  # max levels per side the REST endpoint returns
+
+
+class RotatingLog:
+    """Append-only text log, one file per UTC hour: <root>/<SYMBOL>/<YYYY-MM-DDTHH>.log"""
+
+    def __init__(self, root: Path, symbol: str):
+        self.dir = root / symbol
+        self.dir.mkdir(parents=True, exist_ok=True)
+        self.hour = None
+        self.f = None
+
+    def write(self, session: int, kind: str, payload: str) -> None:
+        rx_ns = time.time_ns()
+        hour = datetime.fromtimestamp(rx_ns / 1e9, timezone.utc).strftime("%Y-%m-%dT%H")
+        if hour != self.hour:
+            self.close()
+            self.f = open(self.dir / f"{hour}.log", "a", buffering=1 << 16, encoding="utf-8")
+            self.hour = hour
+        self.f.write(f"{rx_ns} {session} {kind} {payload}\n")
+
+    def flush(self) -> None:
+        if self.f:
+            self.f.flush()
+
+    def close(self) -> None:
+        if self.f:
+            self.f.close()
+            self.f = None
+
+
+async def snapshot_loop(http, log, symbol, session, interval):
+    """Fetch a REST depth snapshot now, then every `interval` seconds."""
+    while True:
+        try:
+            params = {"symbol": symbol, "limit": SNAPSHOT_LIMIT}
+            async with http.get(REST_URL, params=params) as r:
+                body = await r.text()
+                if r.status == 200:
+                    log.write(session, "snap", body)
+                else:
+                    log.write(session, "err", f"snapshot http {r.status} {body[:200]}")
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            log.write(session, "err", f"snapshot {e!r}")
+        log.flush()
+        await asyncio.sleep(interval)
+
+
+async def run_session(http, log, symbol, session, snap_interval):
+    url = WS_URL.format(s=symbol.lower())  # stream names must be lowercase
+    async with websockets.connect(url, max_size=None) as ws:
+        log.write(session, "open", url)
+        # Snapshot is requested AFTER the socket is open, so every event that
+        # arrives while the request is in flight is already in the log before it.
+        snap_task = asyncio.create_task(snapshot_loop(http, log, symbol, session, snap_interval))
+        try:
+            async for msg in ws:
+                log.write(session, "ws", msg)
+        finally:
+            snap_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await snap_task
+
+
+async def main(symbol: str, out: Path, snap_interval: float) -> None:
+    log = RotatingLog(out, symbol)
+    backoff = 1
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as http:
+            while True:  # Binance drops every connection after 24h, so reconnect forever
+                session = int(time.time())
+                started = time.monotonic()
+                try:
+                    await run_session(http, log, symbol, session, snap_interval)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:  # network errors, resets, etc.
+                    log.write(session, "err", repr(e))
+                log.write(session, "close", "")
+                log.flush()
+                lived = time.monotonic() - started
+                backoff = 1 if lived > 60 else min(backoff * 2, 60)
+                await asyncio.sleep(backoff)
+    finally:
+        log.close()
+
+
+if __name__ == "__main__":
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("--symbol", default="BTCUSDT")
+    ap.add_argument("--out", type=Path, default=Path("data/raw"))
+    ap.add_argument("--snap-interval", type=float, default=600.0, help="seconds between REST snapshots")
+    args = ap.parse_args()
+    with contextlib.suppress(KeyboardInterrupt):
+        asyncio.run(main(args.symbol.upper(), args.out, args.snap_interval))
