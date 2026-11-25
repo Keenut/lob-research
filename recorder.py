@@ -1,4 +1,4 @@
-"""Binance spot raw recorder: depth diffs + trades + periodic REST snapshots.
+"""Binance spot raw recorder: depth diffs + trades + periodic REST snapshots + clock samples.
 
 Design rule: RECORD RAW, DERIVE LATER. This script never builds an order book.
 It only appends what it received, byte-for-byte, with a local receive timestamp.
@@ -9,8 +9,13 @@ Log line format (one record per line):
     <rx_ns> <session> <kind> <payload>
     rx_ns   : local wall-clock receive time, nanoseconds since epoch
     session : id of the WebSocket connection (unix seconds at connect)
-    kind    : open | ws | snap | err | close
+    kind    : open | ws | snap | clk | err | close
     payload : exchange JSON, untouched (empty for 'close')
+
+'clk' records sample Binance's clock so this PC's clock error can be estimated offline:
+    {"t0": <local ns before request>, "t1": <local ns after response>, "srv": {"serverTime": <ms>}}
+    offset_ms = serverTime - (t0 + t1) / 2e6   (positive: this PC's clock is behind Binance)
+    rtt_ms    = (t1 - t0) / 1e6
 """
 import argparse
 import asyncio
@@ -24,6 +29,7 @@ import websockets
 
 WS_URL = "wss://stream.binance.com:9443/stream?streams={s}@depth@100ms/{s}@trade"
 REST_URL = "https://api.binance.com/api/v3/depth"
+TIME_URL = "https://api.binance.com/api/v3/time"
 SNAPSHOT_LIMIT = 5000  # max levels per side the REST endpoint returns
 
 
@@ -72,32 +78,54 @@ async def snapshot_loop(http, log, symbol, session, interval):
         await asyncio.sleep(interval)
 
 
-async def run_session(http, log, symbol, session, snap_interval):
+async def clock_loop(http, log, session, interval):
+    """Sample Binance's clock now, then every `interval` seconds (see 'clk' in the module docstring)."""
+    while True:
+        try:
+            t0 = time.time_ns()
+            async with http.get(TIME_URL) as r:
+                body = await r.text()
+                t1 = time.time_ns()
+            if r.status == 200:
+                log.write(session, "clk", f'{{"t0":{t0},"t1":{t1},"srv":{body}}}')
+            else:
+                log.write(session, "err", f"clock http {r.status} {body[:200]}")
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            log.write(session, "err", f"clock {e!r}")
+        await asyncio.sleep(interval)
+
+
+async def run_session(http, log, symbol, session, snap_interval, clock_interval):
     url = WS_URL.format(s=symbol.lower())  # stream names must be lowercase
     async with websockets.connect(url, max_size=None) as ws:
         log.write(session, "open", url)
         # Snapshot is requested AFTER the socket is open, so every event that
         # arrives while the request is in flight is already in the log before it.
-        snap_task = asyncio.create_task(snapshot_loop(http, log, symbol, session, snap_interval))
+        tasks = [
+            asyncio.create_task(snapshot_loop(http, log, symbol, session, snap_interval)),
+            asyncio.create_task(clock_loop(http, log, session, clock_interval)),
+        ]
         try:
             async for msg in ws:
                 log.write(session, "ws", msg)
         finally:
-            snap_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await snap_task
+            for t in tasks:
+                t.cancel()
+            for t in tasks:
+                with contextlib.suppress(asyncio.CancelledError):
+                    await t
 
 
-async def main(symbol: str, out: Path, snap_interval: float) -> None:
+async def main(symbol: str, out: Path, snap_interval: float, clock_interval: float) -> None:
     log = RotatingLog(out, symbol)
     backoff = 1
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as http:
-            while True:  # Binance drops every connection after 24h, so reconnect forever
+            while True:  # connections drop (24h limit, network blips), so reconnect forever
                 session = int(time.time())
                 started = time.monotonic()
                 try:
-                    await run_session(http, log, symbol, session, snap_interval)
+                    await run_session(http, log, symbol, session, snap_interval, clock_interval)
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:  # network errors, resets, etc.
@@ -116,6 +144,7 @@ if __name__ == "__main__":
     ap.add_argument("--symbol", default="BTCUSDT")
     ap.add_argument("--out", type=Path, default=Path("data/raw"))
     ap.add_argument("--snap-interval", type=float, default=600.0, help="seconds between REST snapshots")
+    ap.add_argument("--clock-interval", type=float, default=60.0, help="seconds between Binance clock samples")
     args = ap.parse_args()
     with contextlib.suppress(KeyboardInterrupt):
-        asyncio.run(main(args.symbol.upper(), args.out, args.snap_interval))
+        asyncio.run(main(args.symbol.upper(), args.out, args.snap_interval, args.clock_interval))
