@@ -1,0 +1,22 @@
+﻿hours 2026-11-24T23 .. 2026-11-25T22 (24 files)
+
+session 1795561331: 2026-11-24 23:02:12Z -> 2026-11-24 23:07:12Z  events=2,957 applied=2,955 unsynced=2 (0.2 s) first_sync_after=0.2 s gaps=0 syncs=1
+    checks=0 (straddle=0) levels_compared=0 mismatched_levels=0 (untracked=0 unexplained=0) crossed=0 unusable_snaps=0 snaps_after_end=0 stale=0 removed_missing=3,232  last_sync_depth: bid>=58482.79 ask<=61452.5
+session 1795562322: 2026-11-24 23:18:44Z -> 2026-11-25 01:05:46Z  events=63,901 applied=63,894 unsynced=7 (0.7 s) first_sync_after=0.7 s gaps=0 syncs=1
+    checks=10 (straddle=0) levels_compared=100,000 mismatched_levels=4678 (untracked=4678 unexplained=0) crossed=0 unusable_snaps=0 snaps_after_end=0 stale=0 removed_missing=189,405  last_sync_depth: bid>=58501.95 ask<=61438.72
+session 1795568757: 2026-11-25 01:05:58Z -> 2026-11-25 07:05:30Z  events=215,529 applied=215,527 unsynced=2 (0.2 s) first_sync_after=0.2 s gaps=0 syncs=1
+    checks=35 (straddle=0) levels_compared=350,000 mismatched_levels=33934 (untracked=33934 unexplained=0) crossed=0 unusable_snaps=0 snaps_after_end=0 stale=0 removed_missing=830,343  last_sync_depth: bid>=58258.44 ask<=61168.76
+session 1795590376: 2026-11-25 07:06:17Z -> 2026-11-25 14:10:05Z  events=254,173 applied=254,171 unsynced=2 (0.2 s) first_sync_after=0.2 s gaps=0 syncs=1
+    checks=42 (straddle=0) levels_compared=420,000 mismatched_levels=50996 (untracked=50996 unexplained=0) crossed=0 unusable_snaps=0 snaps_after_end=0 stale=0 removed_missing=1,345,955  last_sync_depth: bid>=57946.37 ask<=60867.06
+session 1795615814: 2026-11-25 14:10:15Z -> 2026-11-25 17:15:01Z  events=110,848 applied=110,846 unsynced=2 (0.2 s) first_sync_after=0.2 s gaps=0 syncs=1
+    checks=18 (straddle=0) levels_compared=180,000 mismatched_levels=14939 (untracked=14939 unexplained=0) crossed=0 unusable_snaps=0 snaps_after_end=0 stale=0 removed_missing=1,433,471  last_sync_depth: bid>=56832.44 ask<=59997.07
+session 1795626911: 2026-11-25 17:15:12Z -> 2026-11-25 21:45:37Z  events=162,123 applied=162,121 unsynced=2 (0.2 s) first_sync_after=0.2 s gaps=0 syncs=1
+    checks=27 (straddle=0) levels_compared=270,000 mismatched_levels=53244 (untracked=53244 unexplained=0) crossed=0 unusable_snaps=0 snaps_after_end=0 stale=0 removed_missing=1,081,072  last_sync_depth: bid>=57368.93 ask<=60779.27
+session 1795643189: 2026-11-25 21:46:30Z -> 2026-11-25 22:59:59Z  events=43,628 applied=43,626 unsynced=2 (0.2 s) first_sync_after=0.2 s gaps=0 syncs=1
+    checks=7 (straddle=0) levels_compared=70,000 mismatched_levels=1246 (untracked=1246 unexplained=0) crossed=0 unusable_snaps=0 snaps_after_end=0 stale=0 removed_missing=86,010  last_sync_depth: bid>=58565.66 ask<=61645.28
+
+total: sessions=7 events=853,159 applied=853,140 unsynced=19 stale=0 gaps=0 syncs=7
+validation (top 5000 levels per side): checks=139 levels_compared=1,390,000 mismatched_levels=159,037 (untracked=159,037 unexplained=0) checks_with_unexplained=0 excluded_ambiguous=0 crossed_books=0
+snapshots not compared: unusable=0 after_session_end=0
+wall time 14.0 s incl. Parquet reading (60,835 events/s)
+wrote docs\validation_top5000.csv
