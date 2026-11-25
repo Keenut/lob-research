@@ -69,6 +69,25 @@ def test_validation_exact_match_and_detected_error():
     assert not c.straddle and c.mismatches == [] and c.compared == 3
     bad = run(events, [BASE, snap(105, {99.0: 3.0, 98.0: 1.0}, {101.0: 1.0})])[0]
     assert bad.checks[0].mismatches == [(BID, 99.0, 2.0, 3.0)]
+    assert bad.checks[0].unexplained == [(BID, 99.0, 2.0, 3.0)]
+
+
+def test_levels_beyond_sync_snapshot_depth_are_untracked_not_bugs():
+    # BASE (the sync snapshot) shows bids down to 98.0 and asks up to 101.0 only (depth limit).
+    # The later snapshot reveals levels that existed beyond that depth but never changed.
+    events = [ev(100, 105), ev(106, 108)]
+    later = snap(105, {99.0: 1.0, 98.5: 2.0, 98.0: 1.0, 97.0: 4.0}, {101.0: 1.0, 103.0: 6.0})
+    (c,) = run(events, [BASE, later])[0].checks
+    assert sorted(c.mismatches) == [(BID, 97.0, 0.0, 4.0), (BID, 98.5, 0.0, 2.0), (ASK, 103.0, 0.0, 6.0)]
+    assert c.unexplained == [(BID, 98.5, 0.0, 2.0)]     # 98.5 is INSIDE the synced range: a real error
+
+
+def test_level_beyond_depth_with_wrong_qty_is_unexplained():
+    # 97.0 is beyond the sync depth but a diff set it to 3.0: the book knows it, so a different
+    # snapshot value cannot be blamed on the depth limit
+    events = [ev(100, 105, bids=[(97.0, 3.0)]), ev(106, 108)]
+    (c,) = run(events, [BASE, snap(105, {99.0: 1.0, 98.0: 1.0, 97.0: 4.0}, {101.0: 1.0})])[0].checks
+    assert c.unexplained == [(BID, 97.0, 3.0, 4.0)]
 
 
 def test_validation_inside_an_event_excludes_its_levels():
@@ -181,5 +200,5 @@ def test_end_to_end_raw_log_to_validated_book(tmp_path, seed):
     assert len(s.syncs) == 1 and s.gaps == [] and s.stale == 0
     assert len(s.checks) + s.snaps_after_end == len(snaps) - 1      # every other snapshot was checked
     assert len(s.checks) >= 5
-    assert all(c.mismatches == [] and not c.crossed for c in s.checks)
+    assert all(c.mismatches == [] and c.unexplained == [] and not c.crossed for c in s.checks)
     assert s.book.bids == true[BID] and s.book.asks == true[ASK]   # final book = true book, all levels

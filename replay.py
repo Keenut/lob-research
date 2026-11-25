@@ -19,9 +19,12 @@ Rules, per session (one WebSocket connection; every session starts with no book)
     of update id L, i.e. after the last event with u <= L. If L falls strictly inside the next event
     (U <= L < u), the snapshot contains only part of that event's updates, so the levels that event
     touches are ambiguous and excluded; all other levels must match exactly.
-Limitation: a snapshot has at most 5000 levels per side, so levels deeper than the sync snapshot
-that never changed are unknown. Comparing with a large --top can show mismatches at the deep end
-that are this effect, not bugs.
+Limitation: a snapshot has at most 5000 levels per side. A level deeper than the sync snapshot's
+last level (bid below its lowest bid, ask above its highest ask) is unknown until a diff touches it.
+So each mismatch is classified:
+    untracked   : the level is missing from the book (book qty 0) AND lies beyond the sync snapshot's
+                  depth: expected when the price drifts toward the edge of the synced range;
+    unexplained : every other mismatch: this would be a real bug (or bad data) and must stay 0.
 """
 import argparse
 import csv
@@ -59,7 +62,8 @@ class Check(NamedTuple):
     straddle: bool   # L was inside an event: that event's levels were excluded
     compared: int
     excluded: int
-    mismatches: list
+    mismatches: list   # all of them: [(side, price, book_qty, snap_qty)]
+    unexplained: list  # the subset NOT explained by the snapshot depth limit (see module docstring)
     crossed: bool
     book_levels: int
 
@@ -134,6 +138,7 @@ class SessionReplay:
         self.next_snap = 0
         self.top_n = top_n
         self.book = None             # None = not synced
+        self.bid_floor = self.ask_cap = None   # depth of the sync snapshot: book complete inside it
         self.events = self.applied = self.stale = self.unsynced_events = 0
         self.removed_missing = 0
         self.unusable_snaps = self.skipped_snaps = 0
@@ -177,6 +182,8 @@ class SessionReplay:
         if self.book is None:
             if L + 1 >= e.first_id:                      # U <= L + 1 <= u: the snapshot bridges into e
                 self.book = L2Book.from_snapshot(L, s.bids.items(), s.asks.items())
+                self.bid_floor = min(s.bids) if s.bids else float("inf")
+                self.ask_cap = max(s.asks) if s.asks else float("-inf")
                 self.syncs.append((s.rx_ns, e.rx_ns, L))
                 self.unsynced_ns += e.rx_ns - self._unsynced_since
                 self._unsynced_since = None
@@ -191,9 +198,15 @@ class SessionReplay:
         if L > last:                                     # last < L < u: snapshot taken inside event e
             exclude = {(BID, p) for p in e.bid_px} | {(ASK, p) for p in e.ask_px}
         res = compare_top(self.book, s.bids, s.asks, self.top_n, exclude)
+        unexplained = [m for m in res.mismatches if not self._untracked(*m)]
         self.checks.append(Check(self.session, s.rx_ns, L, L > last, res.compared, res.excluded,
-                                 res.mismatches, self.book.crossed(),
+                                 res.mismatches, unexplained, self.book.crossed(),
                                  len(self.book.bids) + len(self.book.asks)))
+
+    def _untracked(self, side, price, book_qty, snap_qty):
+        """Missing from the book and beyond the sync snapshot's depth: unknown to us, not a bug."""
+        beyond = price < self.bid_floor if side == BID else price > self.ask_cap
+        return book_qty == 0.0 and beyond
 
     def finish(self):
         if self._unsynced_since is not None and self.last_rx is not None:
@@ -233,43 +246,40 @@ def utc(rx_ns):
 
 
 def report(sessions, top_n, seconds):
-    tot = dict(events=0, applied=0, stale=0, unsynced=0, gaps=0, syncs=0, checks=0, bad_checks=0,
-               compared=0, excluded=0, mismatches=0, crossed=0, unusable=0, after_end=0)
+    keys = ("events", "applied", "stale", "unsynced", "gaps", "syncs", "checks", "bad_checks", "compared",
+            "excluded", "mismatches", "unexplained", "crossed", "unusable", "after_end")
+    tot = dict.fromkeys(keys, 0)
     for s in sessions:
-        bad = [c for c in s.checks if c.mismatches]
+        n = dict(events=s.events, applied=s.applied, stale=s.stale, unsynced=s.unsynced_events,
+                 gaps=len(s.gaps), syncs=len(s.syncs), checks=len(s.checks),
+                 bad_checks=sum(1 for c in s.checks if c.unexplained),
+                 compared=sum(c.compared for c in s.checks), excluded=sum(c.excluded for c in s.checks),
+                 mismatches=sum(len(c.mismatches) for c in s.checks),
+                 unexplained=sum(len(c.unexplained) for c in s.checks),
+                 crossed=sum(c.crossed for c in s.checks), unusable=s.unusable_snaps, after_end=s.snaps_after_end)
+        for k in keys:
+            tot[k] += n[k]
         first_sync = f"{(s.syncs[0][1] - s.first_rx) / 1e9:.1f} s" if s.syncs else "never"
+        depth = f"bid>={s.bid_floor} ask<={s.ask_cap}" if s.syncs else "-"
         print(f"session {s.session}: {utc(s.first_rx)} -> {utc(s.last_rx)}  events={s.events:,} "
               f"applied={s.applied:,} unsynced={s.unsynced_events:,} ({s.unsynced_ns / 1e9:.1f} s) "
-              f"first_sync_after={first_sync} gaps={len(s.gaps)} syncs={len(s.syncs)}")
-        print(f"    checks={len(s.checks)} (straddle={sum(c.straddle for c in s.checks)}) "
-              f"levels_compared={sum(c.compared for c in s.checks):,} "
-              f"mismatched_levels={sum(len(c.mismatches) for c in s.checks)} checks_with_mismatch={len(bad)} "
-              f"crossed={sum(c.crossed for c in s.checks)} unusable_snaps={s.unusable_snaps} "
-              f"snaps_after_end={s.snaps_after_end} stale={s.stale} removed_missing={s.removed_missing:,}")
+              f"first_sync_after={first_sync} gaps={n['gaps']} syncs={n['syncs']}")
+        print(f"    checks={n['checks']} (straddle={sum(c.straddle for c in s.checks)}) "
+              f"levels_compared={n['compared']:,} mismatched_levels={n['mismatches']} "
+              f"(untracked={n['mismatches'] - n['unexplained']} unexplained={n['unexplained']}) "
+              f"crossed={n['crossed']} unusable_snaps={n['unusable']} snaps_after_end={n['after_end']} "
+              f"stale={n['stale']} removed_missing={s.removed_missing:,}  last_sync_depth: {depth}")
         for rx_ns, exp, got in s.gaps[:5]:
             print(f"    GAP at {utc(rx_ns)}: expected U={exp}, got U={got}")
-        for c in bad[:3]:
-            print(f"    MISMATCH snapshot {utc(c.snap_rx_ns)} L={c.last_update_id}: {len(c.mismatches)} levels, "
-                  f"first: {c.mismatches[:3]}  (side, price, book_qty, snap_qty)")
-        tot["events"] += s.events
-        tot["applied"] += s.applied
-        tot["stale"] += s.stale
-        tot["unsynced"] += s.unsynced_events
-        tot["gaps"] += len(s.gaps)
-        tot["syncs"] += len(s.syncs)
-        tot["checks"] += len(s.checks)
-        tot["bad_checks"] += len(bad)
-        tot["compared"] += sum(c.compared for c in s.checks)
-        tot["excluded"] += sum(c.excluded for c in s.checks)
-        tot["mismatches"] += sum(len(c.mismatches) for c in s.checks)
-        tot["crossed"] += sum(c.crossed for c in s.checks)
-        tot["unusable"] += s.unusable_snaps
-        tot["after_end"] += s.snaps_after_end
+        for c in [c for c in s.checks if c.unexplained][:3]:
+            print(f"    UNEXPLAINED MISMATCH snapshot {utc(c.snap_rx_ns)} L={c.last_update_id}: "
+                  f"{len(c.unexplained)} levels, first: {c.unexplained[:3]}  (side, price, book_qty, snap_qty)")
     t = tot
     print(f"\ntotal: sessions={len(sessions)} events={t['events']:,} applied={t['applied']:,} "
           f"unsynced={t['unsynced']:,} stale={t['stale']} gaps={t['gaps']} syncs={t['syncs']}")
-    print(f"validation (top {top_n} levels per side): checks={t['checks']} checks_with_mismatch={t['bad_checks']} "
-          f"levels_compared={t['compared']:,} mismatched_levels={t['mismatches']} "
+    print(f"validation (top {top_n} levels per side): checks={t['checks']} levels_compared={t['compared']:,} "
+          f"mismatched_levels={t['mismatches']:,} (untracked={t['mismatches'] - t['unexplained']:,} "
+          f"unexplained={t['unexplained']:,}) checks_with_unexplained={t['bad_checks']} "
           f"excluded_ambiguous={t['excluded']:,} crossed_books={t['crossed']}")
     print(f"snapshots not compared: unusable={t['unusable']} after_session_end={t['after_end']}")
     print(f"wall time {seconds:.1f} s incl. Parquet reading ({t['events'] / seconds:,.0f} events/s)")
@@ -280,11 +290,12 @@ def write_csv(sessions, path):
     with open(path, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow(["session", "snap_rx_utc", "last_update_id", "straddle", "compared", "excluded",
-                    "mismatches", "crossed", "book_levels"])
+                    "mismatches", "untracked", "unexplained", "crossed", "book_levels"])
         for s in sessions:
             for c in s.checks:
                 w.writerow([c.session, utc(c.snap_rx_ns), c.last_update_id, int(c.straddle), c.compared,
-                            c.excluded, len(c.mismatches), int(c.crossed), c.book_levels])
+                            c.excluded, len(c.mismatches), len(c.mismatches) - len(c.unexplained),
+                            len(c.unexplained), int(c.crossed), c.book_levels])
 
 
 def main():
