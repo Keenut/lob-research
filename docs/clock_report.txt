@@ -1,0 +1,29 @@
+﻿clock samples: 73 over 1.21 h, rtt min/p50/p99 = 223/249/5544 ms
+good samples (rtt <= 223 + 20 ms): 12
+offset (Binance - local, good samples): median 216.6 ms, range 176.6 .. 254.9 ms, bounds width median 243 ms
+drift: +73.8 ms/h (linear fit), residual sd 4.7 ms, largest step between good samples 13.5 ms
+
+== depth events (rx - E): latency per session (ms); corrected needs a good clock sample within the max gap
+    session   messages  covered  raw p50  raw p99  corr p50  corr p99     bounds p50
+ 1795561331      2,957     0.0%    -1813    -1748         -         -         [-, -]
+ 1795562322     63,901     0.0%       36     1636         -         -         [-, -]
+ 1795568757    215,529     0.0%     -265      -39         -         -         [-, -]
+ 1795590376    254,173     0.0%     -766     -502         -         -         [-, -]
+ 1795615814    110,848     0.0%    -1143     -923         -         -         [-, -]
+ 1795626911    162,123     0.8%      -49      150       133       158      [12, 254]
+ 1795643189     43,628   100.0%      -91     2008       120      2224       [1, 242]
+
+== trades (rx - T, trade time): latency per session (ms); corrected needs a good clock sample within the max gap
+    session   messages  covered  raw p50  raw p99  corr p50  corr p99     bounds p50
+ 1795561331      4,767     0.0%    -1810    -1779         -         -         [-, -]
+ 1795562322    282,171     0.0%       26     4057         -         -         [-, -]
+ 1795568757  1,409,053     0.0%     -198      120         -         -         [-, -]
+ 1795590376  1,634,106     0.0%     -726     -300         -         -         [-, -]
+ 1795615814    923,478     0.0%    -1129     -766         -         -         [-, -]
+ 1795626911    960,691     0.3%    -1274      376       136       384      [16, 258]
+ 1795643189     96,550   100.0%      -73      419       124       601       [5, 245]
+
+== depth events per UTC hour (covered events only): raw drifts with the clock, corrected should not
+      hour_utc   events  offset p50  raw p50  corr p50  corr p99
+ 2026-11-25T21    9,305         182      -58       124       160
+ 2026-11-25T22   35,561         224      -99       120      4137

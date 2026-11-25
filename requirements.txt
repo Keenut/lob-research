@@ -3,4 +3,5 @@ aiohttp
 pyarrow
 duckdb
 pandas
+numpy
 pytest
