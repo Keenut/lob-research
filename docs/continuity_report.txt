@@ -1,0 +1,35 @@
+﻿session 1795561331: 2026-11-25 00:02:12 -> 2026-11-25 00:07:12 (0.08 h)  events=2957 synced=True ignored_old=2 overlaps=0 gaps=0 unsynced_buffer=0
+    latency rx-E: p50=-1813 ms  p99=-1748 ms
+session 1795562322: 2026-11-25 00:18:44 -> 2026-11-25 02:05:56 (1.79 h)  events=63901 synced=True ignored_old=7 overlaps=0 gaps=0 unsynced_buffer=0
+    latency rx-E: p50=36 ms  p99=1636 ms
+    log error x1: ConnectionClosedError(None, Close(code=<CloseCode.INTERNAL_ERROR: 1011>, reason='keepalive ping timeout'), None)
+session 1795568757: 2026-11-25 02:05:58 -> 2026-11-25 08:06:01 (6.00 h)  events=215529 synced=True ignored_old=2 overlaps=0 gaps=0 unsynced_buffer=0
+    latency rx-E: p50=-265 ms  p99=-39 ms
+    log error x1: ConnectionClosedError(None, None, None)
+session 1795590362: 2026-11-25 08:06:02 -> 2026-11-25 08:06:02 (0.00 h)  events=0 synced=False ignored_old=0 overlaps=0 gaps=0 unsynced_buffer=0
+    log error x1: gaierror(11001, 'getaddrinfo failed')
+session 1795590364: 2026-11-25 08:06:04 -> 2026-11-25 08:06:04 (0.00 h)  events=0 synced=False ignored_old=0 overlaps=0 gaps=0 unsynced_buffer=0
+    log error x1: gaierror(11001, 'getaddrinfo failed')
+session 1795590368: 2026-11-25 08:06:08 -> 2026-11-25 08:06:08 (0.00 h)  events=0 synced=False ignored_old=0 overlaps=0 gaps=0 unsynced_buffer=0
+    log error x1: gaierror(11001, 'getaddrinfo failed')
+session 1795590376: 2026-11-25 08:06:17 -> 2026-11-25 15:10:13 (7.07 h)  events=254173 synced=True ignored_old=2 overlaps=0 gaps=0 unsynced_buffer=0
+    latency rx-E: p50=-766 ms  p99=-502 ms
+    log error x1: ConnectionClosedError(None, None, None)
+session 1795615814: 2026-11-25 15:10:15 -> 2026-11-25 18:15:10 (3.08 h)  events=110848 synced=True ignored_old=2 overlaps=0 gaps=0 unsynced_buffer=0
+    latency rx-E: p50=-1143 ms  p99=-923 ms
+    log error x1: ConnectionClosedError(None, None, None)
+session 1795626911: 2026-11-25 18:15:12 -> 2026-11-25 22:45:37 (4.51 h)  events=162123 synced=True ignored_old=2 overlaps=0 gaps=0 unsynced_buffer=0
+    latency rx-E: p50=-49 ms  p99=150 ms
+session 1795643189: 2026-11-25 22:46:30 -> 2026-11-25 23:59:59 (1.22 h)  events=43628 synced=True ignored_old=2 overlaps=0 gaps=0 unsynced_buffer=0
+    latency rx-E: p50=-91 ms  p99=2009 ms
+
+data holes between consecutive sessions with depth data:
+    1795561331 -> 1795562322: 692.2 s  (2026-11-25 00:07:12 to 2026-11-25 00:18:44)
+    1795562322 -> 1795568757: 12.1 s  (2026-11-25 02:05:46 to 2026-11-25 02:05:58)
+    1795568757 -> 1795590376: 47.7 s  (2026-11-25 08:05:30 to 2026-11-25 08:06:17)
+    1795590376 -> 1795615814: 10.1 s  (2026-11-25 15:10:05 to 2026-11-25 15:10:15)
+    1795615814 -> 1795626911: 11.3 s  (2026-11-25 18:15:01 to 2026-11-25 18:15:12)
+    1795626911 -> 1795643189: 53.6 s  (2026-11-25 22:45:37 to 2026-11-25 22:46:30)
+
+total: sessions=10 (7 with data)  sequence gaps=0  holes=6 (827.0 s of 23.96 h, coverage 99.04%)
+receive latency (rx - E): p50=-543 ms  p99=109 ms  (includes the clock offset between your PC and Binance)
