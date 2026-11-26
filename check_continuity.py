@@ -20,12 +20,12 @@ Across sessions it also reports:
     (a new session means the connection dropped, so the sequence check cannot see what was missed);
   - the 'err' lines the recorder logged (why a connection or snapshot request failed);
   - receive latency (rx - E) per session, whose median also shows the clock offset to Binance.
-Times are printed in your local time. File names are UTC hours.
+Times are printed in UTC, like the file names (a trailing Z marks UTC).
 """
 import json
 import sys
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -95,7 +95,7 @@ def percentile(sorted_vals, q):
 
 
 def ts(rx_ns):
-    return datetime.fromtimestamp(rx_ns / 1e9).strftime("%Y-%m-%d %H:%M:%S")  # local time
+    return datetime.fromtimestamp(rx_ns / 1e9, timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
 
 
 def check(paths):
