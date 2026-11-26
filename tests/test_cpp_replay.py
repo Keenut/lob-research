@@ -195,3 +195,51 @@ def test_to_int_rejects_values_off_the_grid():
     assert bookdata.to_int([57848.86, 0.01], 100, "p").tolist() == [5784886, 1]
     with pytest.raises(ValueError):
         bookdata.to_int([57848.865], 100, "p")                 # half a tick: wrong tick size
+
+
+# ---------------------------------------------------------------- benchmark instrumentation
+
+def test_profile_matches_a_brute_force_count_and_changes_nothing():
+    """profile=True must not change any result, and its counts must equal a direct recount: for every
+    applied level update, how many levels were better, and whether it inserted, erased, etc."""
+    mev, msn, _ = synthetic_market(9, n_updates=3000)
+    events, snaps = objects_from_market(mev, msn, session=5, rx0=10**12)
+    plain, _ = run_cpp(events, snaps, 10, "vector")
+    r = lobcpp.VecReplayer(10, profile=True)
+    sn = bookdata.snapshots_from_objects(snaps)
+    r.set_snapshots(sn["rx"], sn["session"], sn["last_id"], sn["offsets"], sn["side"], sn["price"], sn["qty"])
+    a = bookdata.events_from_objects(events)
+    out = r.process(a["rx"], a["session"], a["first_id"], a["last_id"], a["offsets"], a["side"], a["price"],
+                    a["qty"], timings=True)
+    r.finish()
+    assert [replay.session_summary(replay.CppSession(d, 100, 10**8)) for d in r.sessions()] == plain
+    assert len(out["ns"]) == len(events) and out["ns"].min() >= 0
+
+    # recount: the first snapshot syncs (no gaps in this stream), then every event with u > L is applied
+    first = snaps[0]
+    book = {BID: {round(p * 100): round(q * 1e8) for p, q in first.bids.items()},
+            ASK: {round(p * 100): round(q * 1e8) for p, q in first.asks.items()}}
+    want = dict(inserts=0, erases=0, in_place=0, missing=0, shifted=0, by_depth=[0] * 6)
+    for e in events:
+        if e.last_id <= first.last_update_id:
+            continue
+        for side, px, qs in ((BID, e.bid_px, e.bid_qty), (ASK, e.ask_px, e.ask_qty)):
+            for p, q in zip(px, qs):
+                p, q = round(p * 100), round(q * 1e8)
+                levels = book[side]
+                better = sum(1 for x in levels if (x > p if side == BID else x < p))
+                found = p in levels
+                if q == 0:
+                    want["erases" if found else "missing"] += 1
+                else:
+                    want["in_place" if found else "inserts"] += 1
+                if (q == 0) == found:            # erase or insert: the vector shifts 'better' elements
+                    want["shifted"] += better
+                    want["by_depth"][min(len(str(better)) if better else 0, 5)] += 1
+                if q == 0:
+                    levels.pop(p, None)
+                else:
+                    levels[p] = q
+    got = r.profile()
+    assert {k: got[k] for k in want} == want
+    assert got["events"] == (out["status"] == 0).sum()

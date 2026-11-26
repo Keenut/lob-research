@@ -18,6 +18,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <iterator>
 #include <map>
 #include <optional>
 #include <vector>
@@ -32,6 +33,12 @@ enum Side : int { kBid = 0, kAsk = 1 };  // same encoding as the 'side' column o
 struct Level {
     Price price;
     Qty qty;
+};
+
+// Where a price sits in a side, without changing it (used by the benchmark's depth profile).
+struct Probe {
+    bool found;          // a level at this price exists
+    std::size_t better;  // number of levels with a strictly better price
 };
 
 inline bool operator==(const Level& a, const Level& b) { return a.price == b.price && a.qty == b.qty; }
@@ -88,6 +95,14 @@ public:
             if (!f(*it)) return;
     }
 
+    // For an insert or erase at p, 'better' is also the number of elements the vector has to shift.
+    Probe probe(Price p) const {
+        auto it = std::lower_bound(levels_.begin(), levels_.end(), p,
+                                   [](const Level& l, Price x) { return Worse{}(l.price, x); });
+        const bool found = it != levels_.end() && it->price == p;
+        return Probe{found, static_cast<std::size_t>(levels_.end() - it) - (found ? 1 : 0)};
+    }
+
     std::size_t size() const { return levels_.size(); }
     void clear() { levels_.clear(); }
 
@@ -125,6 +140,12 @@ public:
     void for_each_best_first(F f) const {
         for (auto it = levels_.rbegin(); it != levels_.rend(); ++it)
             if (!f(Level{it->first, it->second})) return;
+    }
+
+    Probe probe(Price p) const {  // O(n) because of std::distance: for profiling only
+        auto it = levels_.lower_bound(p);  // first price that is not worse than p
+        const bool found = it != levels_.end() && it->first == p;
+        return Probe{found, static_cast<std::size_t>(std::distance(it, levels_.end())) - (found ? 1 : 0)};
     }
 
     std::size_t size() const { return levels_.size(); }

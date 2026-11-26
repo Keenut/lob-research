@@ -12,6 +12,8 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <numeric>
@@ -67,10 +69,20 @@ struct SessionResult {
     std::optional<Price> bid_floor, ask_cap;
 };
 
+// Benchmark profile of the applied level updates (filled only when profiling is on).
+// 'better' = number of levels with a better price than the updated one; for a sorted vector, an insert
+// or erase at that price shifts exactly that many elements.
+struct Profile {
+    std::int64_t inserts = 0, erases = 0, in_place = 0, missing = 0;  // what each level update did
+    std::int64_t shifted = 0;               // sum of 'better' over inserts and erases
+    std::array<std::int64_t, 6> by_depth{};  // inserts + erases by 'better': 0, 1-9, 10-99, ..., >= 10000
+    std::int64_t events = 0, bid_levels = 0, ask_levels = 0;  // book size summed over applied events
+};
+
 template <class Book>
 class Replayer {
 public:
-    explicit Replayer(std::size_t top_n) : top_n_(top_n) {}
+    explicit Replayer(std::size_t top_n, bool profile = false) : top_n_(top_n), profiling_(profile) {}
 
     // All snapshots, given once before the events, in receive order. Snapshot i owns the levels
     // [offsets[i], offsets[i + 1]) of the side / price / qty arrays.
@@ -102,15 +114,24 @@ public:
     // Process consecutive depth events (e.g. one hour at a time; the state carries over between calls).
     // Event i owns the levels [offsets[i], offsets[i + 1]). The output arrays (all optional, length n)
     // receive the status of each event and the top of book after it (0 when not synced or side empty).
+    // ns, if given, receives the time spent in each event (steady_clock; the top-of-book output excluded).
     void process(std::size_t n, const std::int64_t* rx, const std::int64_t* session, const std::int64_t* first_id,
                  const std::int64_t* last_id, const std::int64_t* offsets, const std::int8_t* side,
                  const Price* price, const Qty* qty, std::int8_t* status, Price* bid_px, Qty* bid_qty,
-                 Price* ask_px, Qty* ask_qty) {
+                 Price* ask_px, Qty* ask_qty, std::int64_t* ns = nullptr) {
+        using clock = std::chrono::steady_clock;
         started_ = true;
         for (std::size_t i = 0; i < n; ++i) {
             const std::int64_t b = offsets[i];
             const auto m = static_cast<std::size_t>(offsets[i + 1] - b);
-            const EventStatus st = on_event(rx[i], session[i], first_id[i], last_id[i], side + b, price + b, qty + b, m);
+            EventStatus st;
+            if (ns) {
+                const auto t0 = clock::now();
+                st = on_event(rx[i], session[i], first_id[i], last_id[i], side + b, price + b, qty + b, m);
+                ns[i] = std::chrono::duration_cast<std::chrono::nanoseconds>(clock::now() - t0).count();
+            } else {
+                st = on_event(rx[i], session[i], first_id[i], last_id[i], side + b, price + b, qty + b, m);
+            }
             if (status) status[i] = st;
             if (bid_px) {
                 const std::optional<Level> bb = synced_ ? book_.bids.best() : std::nullopt;
@@ -129,6 +150,7 @@ public:
     }
 
     const std::vector<SessionResult>& sessions() const { return results_; }
+    const Profile& profile() const { return profile_; }
 
 private:
     struct Snapshot {
@@ -167,9 +189,37 @@ private:
             ++s.stale;
             return kStale;
         }
-        s.removed_missing += book_.apply(side, price, qty, n_levels, u);
+        if (profiling_)
+            s.removed_missing += apply_profiled(side, price, qty, n_levels, u);
+        else
+            s.removed_missing += book_.apply(side, price, qty, n_levels, u);
         ++s.applied;
         return kApplied;
+    }
+
+    // Same result as book_.apply(), level by level, recording where each update lands first.
+    std::int64_t apply_profiled(const std::int8_t* side, const Price* price, const Qty* qty, std::size_t n,
+                                std::int64_t u) {
+        std::int64_t missing = 0;
+        for (std::size_t k = 0; k < n; ++k) {
+            const Side sd = static_cast<Side>(side[k]);
+            const Probe pr = sd == kBid ? book_.bids.probe(price[k]) : book_.asks.probe(price[k]);
+            const bool moves = qty[k] == 0 ? pr.found : !pr.found;  // an erase or an insert
+            if (qty[k] == 0) (pr.found ? profile_.erases : profile_.missing) += 1;
+            else (pr.found ? profile_.in_place : profile_.inserts) += 1;
+            if (moves) {
+                profile_.shifted += static_cast<std::int64_t>(pr.better);
+                std::size_t bucket = 0;
+                for (std::size_t x = pr.better; x > 0 && bucket < 5; x /= 10) ++bucket;
+                ++profile_.by_depth[bucket];
+            }
+            if (!book_.set(sd, price[k], qty[k])) ++missing;
+        }
+        book_.last_update_id = u;
+        ++profile_.events;
+        profile_.bid_levels += static_cast<std::int64_t>(book_.bids.size());
+        profile_.ask_levels += static_cast<std::int64_t>(book_.asks.size());
+        return missing;
     }
 
     void use_snapshot(const Snapshot& sn, std::int64_t rx, std::int64_t U, const std::int8_t* side,
@@ -287,6 +337,8 @@ private:
     }
 
     std::size_t top_n_;
+    bool profiling_;
+    Profile profile_;
     std::vector<Snapshot> snaps_;
     std::vector<std::size_t> order_;           // snapshot indices sorted by (session, update id)
     std::vector<SessionResult> results_;       // finished sessions

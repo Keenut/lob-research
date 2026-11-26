@@ -19,8 +19,12 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
+#include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <initializer_list>
+#include <limits>
+#include <string>
 #include <optional>
 #include <stdexcept>
 #include <utility>
@@ -157,7 +161,8 @@ template <class Book>
 static void bind_replayer(py::module_& m, const char* name) {
     using R = lob::Replayer<Book>;
     py::class_<R>(m, name)
-        .def(py::init<std::size_t>(), py::arg("top_n") = 100)
+        .def(py::init<std::size_t, bool>(), py::arg("top_n") = 100, py::arg("profile") = false,
+             "profile=True records where each level update lands (slower; for bench.py)")
         .def(
             "set_snapshots",
             [](R& r, const I64& rx, const I64& session, const I64& last_id, const I64& offsets, const I8& side,
@@ -172,25 +177,46 @@ static void bind_replayer(py::module_& m, const char* name) {
         .def(
             "process",
             [](R& r, const I64& rx, const I64& session, const I64& first_id, const I64& last_id, const I64& offsets,
-               const I8& side, const I64& price, const I64& qty) {
+               const I8& side, const I64& price, const I64& qty, bool timings) {
                 const py::ssize_t n = rx.size();
                 check_len(n, {&session, &first_id, &last_id});
                 check_csr(n, offsets, side, price, qty);
                 py::array_t<std::int8_t> status(n);
-                py::array_t<std::int64_t> bid_px(n), bid_qty(n), ask_px(n), ask_qty(n);
+                py::array_t<std::int64_t> bid_px(n), bid_qty(n), ask_px(n), ask_qty(n), ns(timings ? n : 0);
                 r.process(static_cast<std::size_t>(n), rx.data(), session.data(), first_id.data(), last_id.data(),
                           offsets.data(), side.data(), price.data(), qty.data(), status.mutable_data(),
-                          bid_px.mutable_data(), bid_qty.mutable_data(), ask_px.mutable_data(), ask_qty.mutable_data());
+                          bid_px.mutable_data(), bid_qty.mutable_data(), ask_px.mutable_data(), ask_qty.mutable_data(),
+                          timings ? ns.mutable_data() : nullptr);
                 py::dict out;
                 out["status"] = status;  // 0 applied, 1 not synced, 2 stale
                 out["bid_px"] = bid_px;  // top of book after each event; 0 = none
                 out["bid_qty"] = bid_qty;
                 out["ask_px"] = ask_px;
                 out["ask_qty"] = ask_qty;
+                if (timings) out["ns"] = ns;  // time spent in each event, nanoseconds
                 return out;
             },
+            py::arg("rx"), py::arg("session"), py::arg("first_id"), py::arg("last_id"), py::arg("offsets"),
+            py::arg("side"), py::arg("price"), py::arg("qty"), py::arg("timings") = false,
             "Process consecutive depth events; returns per-event status and top of book.")
         .def("finish", &R::finish, "Close the current session (after the last event).")
+        .def(
+            "profile",
+            [](const R& r) {
+                const lob::Profile& p = r.profile();
+                py::dict d;
+                d["inserts"] = p.inserts;
+                d["erases"] = p.erases;
+                d["in_place"] = p.in_place;
+                d["missing"] = p.missing;
+                d["shifted"] = p.shifted;
+                d["by_depth"] = std::vector<std::int64_t>(p.by_depth.begin(), p.by_depth.end());
+                d["events"] = p.events;
+                d["bid_levels"] = p.bid_levels;
+                d["ask_levels"] = p.ask_levels;
+                return d;
+            },
+            "Counts recorded when constructed with profile=True.")
         .def(
             "sessions",
             [](const R& r) {
@@ -207,4 +233,31 @@ PYBIND11_MODULE(lobcpp, m) {
     bind_book<lob::MapBook>(m, "MapBook");
     bind_replayer<lob::VecBook>(m, "VecReplayer");
     bind_replayer<lob::MapBook>(m, "MapReplayer");
+
+    // Smallest step of steady_clock seen in practice (it bounds the precision of per-event timings).
+    m.def("clock_resolution_ns", []() {
+        using clock = std::chrono::steady_clock;
+        std::int64_t best = std::numeric_limits<std::int64_t>::max();
+        for (int i = 0; i < 20000; ++i) {
+            const auto t0 = clock::now();
+            auto t1 = clock::now();
+            while (t1 == t0) t1 = clock::now();
+            best = std::min<std::int64_t>(best, std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
+        }
+        return best;
+    });
+#if defined(_MSC_VER)
+    m.attr("compiler") = "MSVC " + std::to_string(_MSC_FULL_VER);
+#elif defined(__clang__)
+    m.attr("compiler") = std::string("clang ") + __clang_version__;
+#elif defined(__GNUC__)
+    m.attr("compiler") = std::string("gcc ") + __VERSION__;
+#else
+    m.attr("compiler") = "unknown";
+#endif
+#ifdef NDEBUG
+    m.attr("build") = "release";  // optimized, asserts off
+#else
+    m.attr("build") = "debug";
+#endif
 }
