@@ -1,11 +1,11 @@
 # lob-research
 
 Research platform for the Binance spot limit order book (BTCUSDT): a raw market-data recorder,
-an ETL to Parquet, a Python reference L2 order book validated against exchange snapshots, and
-clock-corrected latency measurement.
+an ETL to Parquet, a Python reference L2 order book validated against exchange snapshots, a C++
+book and replay engine checked against that reference, and clock-corrected latency measurement.
 
-**Status: in progress.** Data capture, the Python reference book and the clock/latency analysis
-are done. The C++ book engine, the microstructure research and the trading simulator are planned.
+**Status: in progress.** Data capture, the Python reference book, the C++ engine and the
+clock/latency analysis are done. The microstructure research and the trading simulator are planned.
 
 All numbers below were measured on the 24 UTC hour files `2026-11-24T23` to `2026-11-25T22`
 and come from the reports in [`docs/`](docs/). All times are UTC.
@@ -15,7 +15,7 @@ and come from the reports in [`docs/`](docs/). All times are UTC.
 | Recorder, continuity checker, ETL to Parquet, DuckDB queries | done |
 | Python reference L2 book, validated against REST snapshots | done |
 | Clock offset to the exchange, corrected latency | done |
-| C++17 L2 book engine (pybind11), differential tests against the Python reference, benchmark | planned |
+| C++17 L2 book and replay engine (pybind11), differential tests against the Python reference, benchmark | done |
 | Microstructure research (spread, depth imbalance, order flow imbalance, microprice, short-horizon prediction) | planned |
 | Simulator (Avellaneda–Stoikov quoting, signal-based taking, fees, latency and queue models, P&L attribution) | planned |
 
@@ -36,6 +36,8 @@ Binance spot, BTCUSDT
         |                    |                       |
    explore.py         replay.py + book.py        clock.py
    (DuckDB queries)   (L2 book, validation)      (clock offset, latency)
+                             |
+                      lobcpp: C++ book + replay (cpp/), same results (crosscheck.py)
 ```
 
 Design rules:
@@ -62,6 +64,16 @@ python replay.py                                     # rebuilds the book, valida
 python clock.py                                      # clock offset and corrected latency
 python explore.py                                    # DuckDB sanity, latency spike and clock step queries
 python -m pytest -q                                  # tests
+
+# C++ engine: Visual Studio 2022 with "Desktop development with C++", venv active
+$py = (Get-Command python).Source -replace '\\', '/'
+$pb = (python -c "import pybind11; print(pybind11.get_cmake_dir())") -replace '\\', '/'
+cmake -S cpp -B build -G "Visual Studio 17 2022" -A x64 -DPython_EXECUTABLE="$py" -Dpybind11_DIR="$pb"
+cmake --build build --config Release
+.\build\Release\lob_tests.exe                        # C++ unit tests
+python replay.py --engine cpp                        # same report as replay.py, C++ engine
+python crosscheck.py                                 # Python and C++ engines must agree exactly
+python bench.py                                      # speed, data already in memory
 ```
 
 ## Data format
@@ -91,7 +103,7 @@ the original with SHA-256 before the `.log` is deleted); `etl.py` and `check_con
 | `session_log` | `open` / `err` / `close` record | `rx_ns, session, kind, text` |
 
 Prices and quantities are float64 parsed from the exchange's decimal strings; the same string always
-gives the same float, so exact comparisons are valid. The C++ engine will use integer ticks.
+gives the same float, so exact comparisons are valid. The C++ engine uses integer ticks and lots.
 
 ## L2 book reconstruction (`book.py`, `replay.py`)
 
@@ -115,6 +127,21 @@ Per session (one WebSocket connection; every session starts without a book), fol
    snapshot's depth (below its lowest bid or above its highest ask), where a 5000-level snapshot
    shows nothing until a diff touches the level. *Unexplained*: any other mismatch, which would be a
    bug or bad data and must be 0.
+
+## C++ engine (`cpp/`, Python module `lobcpp`)
+
+- `book.hpp`: the same L2 book semantics as `book.py`, with prices as integer ticks (0.01 USDT) and
+  quantities as integer lots (1e-8 BTC). Each side keeps its levels ordered from worst to best, in
+  one of two interchangeable containers: a sorted `std::vector` or a `std::map`.
+- `replay.hpp`: the state machine of `replay.py` (sync, gaps, stale events, snapshot checks,
+  untracked / unexplained mismatches), generic over the book container, processing one hour per call
+  and giving the top of book after every event.
+- `bindings.cpp`: the pybind11 module. Events and levels travel as NumPy arrays in CSR layout
+  (event *i* owns levels `offsets[i]` to `offsets[i+1]`), so an hour goes to C++ in one call without
+  copying.
+- `bookdata.py`: Parquet → integer arrays. A price that is not a whole number of ticks raises an error
+  instead of being rounded. The conversion is exact both ways: `ticks / 100` is the same double as the
+  exchange's decimal string, so the two engines' results can be compared with `==`.
 
 ## Clock and latency (`clock.py`)
 
@@ -182,8 +209,7 @@ Window: 24 UTC hour files, first depth message 2026-11-24 23:02:12, last 2026-11
 - In all 139 checks the snapshot's `lastUpdateId` was equal to the last update id `u` of a diff event:
   in this data no snapshot fell inside a 100 ms event, so the ambiguity exclusion (implemented and
   tested) was never used.
-- Speed of the Python reference: 44.8k–68.1k events/s over six full replays on one PC, including
-  Parquet reading. This is a baseline for the C++ engine, not a benchmark.
+- Speed: see "C++ engine: agreement and speed" below.
 
 ### Clock ([`clock_report.txt`](docs/clock_report.txt), [`clock_report_slack40.txt`](docs/clock_report_slack40.txt), [`explore_report.txt`](docs/explore_report.txt))
 
@@ -236,6 +262,45 @@ Corrected one-way latency, last session (21:46–22:59, 100 % covered by clock s
   delayed, not lost (0 sequence gaps).
 - Consequence for research: use the exchange time `E` as the event clock and `rx` only to model latency.
 
+## C++ engine: agreement and speed
+
+### Agreement with the Python reference ([`crosscheck_top1000.txt`](docs/crosscheck_top1000.txt))
+
+On the 24 hours (853,159 events), the Python reference, the C++ engine with the vector book and the
+C++ engine with the map book give identical results: every session result and all 139 snapshot checks
+with their complete mismatch lists, at 100 and at 1000 levels per side (at 1000: 278,000 levels
+compared, 344 mismatches, all untracked). The status and the top of book (best bid and ask with their
+quantities) after each of the 853,159 events are identical between the two C++ books, and equal to the
+Python reference at the 8,531 applied events sampled for it.
+
+### Speed ([`benchmark.txt`](docs/benchmark.txt))
+
+Intel Core Ultra 5 125H laptop, Windows 11, MSVC 19.44 release build, Python 3.14; the recorder was
+running in the background. Data already in memory (Parquet reading not timed); median of 3 runs after
+a warm-up run.
+
+All 24 hours (853,159 events, 44,064,700 level updates):
+
+| Engine | Time | Events/s | Level updates/s | ns per update | Per event p50 / p99 / p99.9 |
+|---|---|---|---|---|---|
+| C++, `std::map` book | 4.53 s | 188,307 | 9.73 M | 102.8 | 2.6 / 38.8 / 70.2 µs |
+| C++, sorted `std::vector` book | 13.91 s | 61,318 | 3.17 M | 315.8 | 4.8 / 130.5 / 272.3 µs |
+
+(Per-event times: a separate run with a clock around each event; clock resolution 100 ns.)
+
+**Why the vector loses.** "A sorted vector beats a tree" holds when changes happen near the end of the
+vector. Profiling the 44,064,232 applied level updates shows that here they do not: 35.3 % insert a
+new price level and 35.2 % erase one (18.3 % change a quantity, 11.3 % remove a level that is not in
+the book), and an insert or erase has on average 275 better levels above it (46.7 % between 10 and 99,
+34.3 % between 100 and 999). In a vector ordered with the best price last, each of them shifts that
+many 16-byte elements, about 4.3 KiB, in a book of about 7,100 bid and 6,300 ask levels. The tree pays
+a few pointer hops instead.
+
+**Against the Python reference** (first 2 hours, 63,392 events): Python 0.257 s, C++ map 0.198 s
+(1.3× faster), C++ vector 0.682 s. This is not a like-for-like language comparison: the Python
+reference keeps each side in an unordered dict (O(1) per update) and never computes the top of book
+per event, while the C++ engines keep the levels sorted and output the top of book after every event.
+
 ## Limitations
 
 - L2 data only: no queue position or price-time priority (to be modelled in the simulator).
@@ -253,6 +318,9 @@ Corrected one-way latency, last session (21:46–22:59, 100 % covered by clock s
 - The recorder writes through a 64 KiB buffer: a crash can lose the last buffered lines (the ETL and
   the checker skip a truncated last line).
 - One symbol, one venue, one day: nothing here is yet a statistical result about markets.
+- Speed was measured on one laptop with the recorder running; per-event timings have the 100 ns
+  resolution of the Windows clock. A structure designed for this update pattern (for example a
+  tick-indexed price ladder) has not been tried yet.
 - `explore.py`, `replay.py` and `clock.py` read every converted hour: re-running them after converting
   more hours changes the numbers. The reports in `docs/` were produced on the 24 hours above.
 
@@ -268,7 +336,15 @@ Corrected one-way latency, last session (21:46–22:59, 100 % covered by clock s
 | `book.py` | reference L2 book (two dicts) and top-N comparison with a snapshot |
 | `replay.py` | per-session sync / gap / resync state machine, snapshot validation, mismatch classification |
 | `clock.py` | clock offset from the samples, drift, corrected latency with bounds |
-| `tests/` | pytest: book operations and comparison; sync, gap/resync, stale events, validation and mismatch classification; end-to-end raw log → ETL → Parquet → replay on a synthetic market with a known true book; clock offset recovery, path-asymmetry bias, drift, interpolation |
+| `cpp/include/lob/book.hpp` | C++ L2 book: integer ticks and lots, vector or map sides |
+| `cpp/include/lob/replay.hpp` | C++ version of the replay state machine, optional timing and depth profiling |
+| `cpp/src/bindings.cpp` | pybind11 module `lobcpp` |
+| `cpp/tests/test_book.cpp` | C++ unit tests, including a comparison with a deliberately naive book |
+| `cpp/CMakeLists.txt` | build of the tests and of the module |
+| `bookdata.py` | Parquet → integer NumPy arrays for the C++ engine |
+| `crosscheck.py` | runs the Python and both C++ engines on the same data and checks that they agree |
+| `bench.py` | speed of the engines on in-memory data, per-event times, update depth profile |
+| `tests/` | pytest: book operations and comparison; sync, gap/resync, stale events, validation and mismatch classification; end-to-end raw log → ETL → Parquet → replay on a synthetic market with a known true book; clock offset recovery, path-asymmetry bias, drift, interpolation; C++ books and replay against the Python reference on scenarios, random multi-session streams and Parquet |
 | `docs/` | the reports quoted above |
 | `data/` | raw logs and Parquet (git-ignored) |
 
@@ -283,6 +359,8 @@ Reports in `docs/` and the commands that produced them:
 | `replay_top5000.txt`, `validation_top5000.csv` | `python replay.py --top 5000 --csv docs\validation_top5000.csv` |
 | `clock_report.txt` | `python clock.py` |
 | `clock_report_slack40.txt` | `python clock.py --slack-ms 40` |
+| `crosscheck_top1000.txt` | `python crosscheck.py --top 1000` |
+| `benchmark.txt` | `python bench.py` |
 | `windows_time_events.txt` | `Get-WinEvent` on the System log, Kernel-General event 1 (times in the `TimeCreated` lines are local, UTC+1; message language: Turkish) |
 
 ## References
