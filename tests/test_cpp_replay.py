@@ -201,7 +201,9 @@ def test_to_int_rejects_values_off_the_grid():
 
 def test_profile_matches_a_brute_force_count_and_changes_nothing():
     """profile=True must not change any result, and its counts must equal a direct recount: for every
-    applied level update, how many levels were better, and whether it inserted, erased, etc."""
+    applied level update, how many levels were better, whether it inserted, erased, etc., its distance
+    in ticks from the best price of its side, and (when it erases the best level) the distance to the
+    next level. Distance buckets are int.bit_length(), the same as pow2_bucket() in replay.hpp."""
     mev, msn, _ = synthetic_market(9, n_updates=3000)
     events, snaps = objects_from_market(mev, msn, session=5, rx0=10**12)
     plain, _ = run_cpp(events, snaps, 10, "vector")
@@ -219,7 +221,8 @@ def test_profile_matches_a_brute_force_count_and_changes_nothing():
     first = snaps[0]
     book = {BID: {round(p * 100): round(q * 1e8) for p, q in first.bids.items()},
             ASK: {round(p * 100): round(q * 1e8) for p, q in first.asks.items()}}
-    want = dict(inserts=0, erases=0, in_place=0, missing=0, shifted=0, by_depth=[0] * 6)
+    want = dict(inserts=0, erases=0, in_place=0, missing=0, shifted=0, by_depth=[0] * 6,
+                behind=[0] * 64, ahead=[0] * 64, no_best=0, next_gap=[0] * 64, last_level=0)
     for e in events:
         if e.last_id <= first.last_update_id:
             continue
@@ -236,6 +239,17 @@ def test_profile_matches_a_brute_force_count_and_changes_nothing():
                 if (q == 0) == found:            # erase or insert: the vector shifts 'better' elements
                     want["shifted"] += better
                     want["by_depth"][min(len(str(better)) if better else 0, 5)] += 1
+                if not levels:                   # distances, measured before the update
+                    want["no_best"] += 1
+                else:
+                    ranked = sorted(levels, reverse=(side == BID))    # best price first
+                    d = ranked[0] - p if side == BID else p - ranked[0]
+                    want["behind" if d >= 0 else "ahead"][abs(d).bit_length()] += 1
+                    if q == 0 and found and d == 0:                    # the best level itself is erased
+                        if len(ranked) == 1:
+                            want["last_level"] += 1
+                        else:
+                            want["next_gap"][abs(ranked[1] - ranked[0]).bit_length()] += 1
                 if q == 0:
                     levels.pop(p, None)
                 else:
@@ -243,3 +257,8 @@ def test_profile_matches_a_brute_force_count_and_changes_nothing():
     got = r.profile()
     assert {k: got[k] for k in want} == want
     assert got["events"] == (out["status"] == 0).sum()
+    # the stream really exercises the new counters (an all-zero recount would prove nothing)
+    assert sum(want["ahead"]) > 0 and sum(want["next_gap"]) > 0
+    assert sum(1 for n in want["behind"] if n) >= 3      # several distance buckets, not just one
+    assert sum(want["behind"]) + sum(want["ahead"]) + want["no_best"] == \
+        want["inserts"] + want["erases"] + want["in_place"] + want["missing"]

@@ -69,6 +69,15 @@ struct SessionResult {
     std::optional<Price> bid_floor, ask_cap;
 };
 
+// Power-of-two bucket of a distance: the number of bits needed to write x, i.e. 0 -> 0, 1 -> 1,
+// 2..3 -> 2, 4..7 -> 3, ..., and bucket k holds 2^(k-1) <= x < 2^k. (C++20 calls it std::bit_width.)
+// A plain loop: it only runs when profiling.
+inline std::size_t pow2_bucket(std::uint64_t x) {
+    std::size_t k = 0;
+    for (; x != 0; x >>= 1) ++k;
+    return k;
+}
+
 // Benchmark profile of the applied level updates (filled only when profiling is on).
 // 'better' = number of levels with a better price than the updated one; for a sorted vector, an insert
 // or erase at that price shifts exactly that many elements.
@@ -77,6 +86,15 @@ struct Profile {
     std::int64_t shifted = 0;               // sum of 'better' over inserts and erases
     std::array<std::int64_t, 6> by_depth{};  // inserts + erases by 'better': 0, 1-9, 10-99, ..., >= 10000
     std::int64_t events = 0, bid_levels = 0, ask_levels = 0;  // book size summed over applied events
+    // Distance in ticks from each applied update's price to the best price of its side, just before the
+    // update, by pow2_bucket: 'behind' when the price is at or behind the best (distance 0 = the best
+    // itself), 'ahead' when it is better than the best (a new best price); 'no_best': the side was empty.
+    std::array<std::int64_t, 64> behind{}, ahead{};
+    std::int64_t no_best = 0;
+    // Updates that erase the best level itself: distance in ticks to the level that becomes the new best,
+    // by pow2_bucket ('next_gap'), or 'last_level' when the side had no other level.
+    std::array<std::int64_t, 64> next_gap{};
+    std::int64_t last_level = 0;
 };
 
 template <class Book>
@@ -213,6 +231,9 @@ private:
                 for (std::size_t x = pr.better; x > 0 && bucket < 5; x /= 10) ++bucket;
                 ++profile_.by_depth[bucket];
             }
+            const bool erase = qty[k] == 0 && pr.found;
+            if (sd == kBid) profile_distance(book_.bids, kBid, price[k], erase);
+            else profile_distance(book_.asks, kAsk, price[k], erase);
             if (!book_.set(sd, price[k], qty[k])) ++missing;
         }
         book_.last_update_id = u;
@@ -220,6 +241,29 @@ private:
         profile_.bid_levels += static_cast<std::int64_t>(book_.bids.size());
         profile_.ask_levels += static_cast<std::int64_t>(book_.asks.size());
         return missing;
+    }
+
+    // Before an update at price p on side s: its distance in ticks from the best price of s and, if the
+    // update erases the best level itself, the distance from that level to the next one.
+    template <class SideT>
+    void profile_distance(const SideT& s, Side sd, Price p, bool erase) {
+        Price best = 0, next = 0;
+        std::size_t seen = 0;  // levels visited: we only need the best two
+        s.for_each_best_first([&](const Level& l) {
+            (seen == 0 ? best : next) = l.price;
+            return ++seen < 2;
+        });
+        if (seen == 0) {
+            ++profile_.no_best;
+            return;
+        }
+        const Price d = sd == kBid ? best - p : p - best;  // > 0: behind the best; < 0: better than the best
+        if (d >= 0) ++profile_.behind[pow2_bucket(static_cast<std::uint64_t>(d))];
+        else ++profile_.ahead[pow2_bucket(static_cast<std::uint64_t>(-d))];
+        if (erase && d == 0) {  // the best level itself is removed
+            if (seen < 2) ++profile_.last_level;
+            else ++profile_.next_gap[pow2_bucket(static_cast<std::uint64_t>(sd == kBid ? best - next : next - best))];
+        }
     }
 
     void use_snapshot(const Snapshot& sn, std::int64_t rx, std::int64_t U, const std::int8_t* side,

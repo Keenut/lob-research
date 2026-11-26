@@ -214,6 +214,11 @@ static void bind_replayer(py::module_& m, const char* name) {
                 d["events"] = p.events;
                 d["bid_levels"] = p.bid_levels;
                 d["ask_levels"] = p.ask_levels;
+                d["behind"] = std::vector<std::int64_t>(p.behind.begin(), p.behind.end());
+                d["ahead"] = std::vector<std::int64_t>(p.ahead.begin(), p.ahead.end());
+                d["no_best"] = p.no_best;
+                d["next_gap"] = std::vector<std::int64_t>(p.next_gap.begin(), p.next_gap.end());
+                d["last_level"] = p.last_level;
                 return d;
             },
             "Counts recorded when constructed with profile=True.")

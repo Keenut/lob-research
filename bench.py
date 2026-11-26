@@ -4,6 +4,7 @@ on data already in memory: reading and converting the Parquet files is NOT timed
 Usage (PowerShell, from the repo root, after building cpp/ in Release):
     python bench.py                                   # all converted hours
     python bench.py --max-files 4 --repeat 5 --python-hours 1
+    python bench.py --max-files 24 --profile-only     # sections 4-6 only (no timings)
 
 What it measures:
   1. throughput on all hours: wall time of the process() calls only (the replay state machine, the book
@@ -16,6 +17,12 @@ What it measures:
      changes / removals of missing levels, and how many levels are better than the updated price.
      For the sorted vector an insert or erase shifts exactly that many elements: this is what explains
      the difference between the vector and the map book.
+  5. (same profiling run) the distance in TICKS from each update's price to the best price of its side,
+     just before the update. Section 4 counts levels; a container indexed by price (a price ladder)
+     depends on ticks, so this is what sizes its window.
+  6. (same run) when an update erases the best level itself: the distance in ticks to the level that
+     becomes the new best, i.e. how far a price ladder has to scan to find it.
+Distances are grouped in power-of-two buckets (2^(k-1) <= d < 2^k), with cumulative shares.
 Run it on an otherwise idle PC (the recorder may keep running: it uses little CPU), and say so when
 quoting the numbers.
 """
@@ -83,6 +90,28 @@ def line(name, seconds, events, levels, base=None):
             f"{levels / seconds / 1e6:7.2f} M level updates/s  {1e9 * seconds / levels:7.1f} ns/update{speed}")
 
 
+def bucket_label(k):
+    """Distances in power-of-two bucket k (see pow2_bucket in replay.hpp): 0 for k = 0, else 2^(k-1) .. 2^k - 1."""
+    if k == 0:
+        return "0"
+    lo, hi = 1 << (k - 1), (1 << k) - 1
+    return f"{lo:,}" if lo == hi else f"{lo:,}-{hi:,}"
+
+
+def print_buckets(counts, total):
+    """One line per non-empty bucket: tick range, its upper end in USDT, count, share and cumulative share
+    (both in % of total)."""
+    print(f"      {'ticks':>17}  {'up to USDT':>12}  {'updates':>12}  {'share':>8}  {'cumulative':>10}")
+    cum = 0
+    for k, n in enumerate(counts):
+        if n == 0:
+            continue
+        cum += n
+        top_usdt = ((1 << k) - 1) / bookdata.PRICE_SCALE if k else 0.0   # largest distance in the bucket
+        print(f"      {bucket_label(k):>17}  {top_usdt:>12,.2f}  {n:>12,}  {100 * n / total:7.2f} %  "
+              f"{100 * cum / total:9.2f} %")
+
+
 def main():
     ap = argparse.ArgumentParser(description="Benchmark of the replay engines on in-memory data")
     ap.add_argument("--symbol", default="BTCUSDT")
@@ -91,6 +120,7 @@ def main():
     ap.add_argument("--repeat", type=int, default=3, help="timed runs per engine (after one warm-up)")
     ap.add_argument("--python-hours", type=int, default=2, help="hours for the comparison with Python")
     ap.add_argument("--top", type=int, default=100, help="levels per side compared with each snapshot")
+    ap.add_argument("--profile-only", action="store_true", help="skip the timings (sections 1-3)")
     a = ap.parse_args()
 
     import lobcpp
@@ -113,12 +143,19 @@ def main():
     if lobcpp.build != "release":
         print("WARNING: lobcpp is a debug build: the C++ timings below are not meaningful\n")
 
+    if not a.profile_only:
+        timings(a, base, stems, hours, snaps, n_events, n_levels)
+    profile_report(a, hours, snaps)
+
+
+def timings(a, base, stems, hours, snaps, n_events, n_levels):
+    """Sections 1-3: throughput, the same subset with the Python reference, time per event."""
+    import lobcpp
+
     # 1. throughput on all hours
     print(f"1. throughput, all hours (process() calls only; median of {a.repeat} runs after 1 warm-up)")
-    results = {}
     for book in ("vector", "map"):
         med, times = median_time(lambda: run_cpp(book, hours, snaps, a.top)[0], a.repeat)
-        results[book] = med
         print(line(f"cpp {book}", med, n_events, n_levels) + f"   runs: {', '.join(f'{t:.3f}' for t in times)}")
 
     # 2. same subset, with the Python reference
@@ -154,13 +191,18 @@ def main():
         q = np.percentile(ns, [50, 90, 99, 99.9]) / 1e3
         print(f"   {'cpp ' + book:<17} {ns.mean() / 1e3:8.2f} {q[0]:8.2f} {q[1]:8.2f} {q[2]:8.2f} {q[3]:8.2f} "
               f"{ns.max() / 1e3:9.1f}")
+    print()
 
-    # 4. where the updates land
+
+def profile_report(a, hours, snaps):
+    """Sections 4-6, from one profiling run of the vector engine (its probe() is a binary search)."""
     _, r, _ = run_cpp("vector", hours, snaps, a.top, profile=True)
     p = r.profile()
+
+    # 4. where the updates land
     total = p["inserts"] + p["erases"] + p["in_place"] + p["missing"]
     moves = p["inserts"] + p["erases"]
-    print(f"\n4. where the {total:,} applied level updates land (profiling run)")
+    print(f"4. where the {total:,} applied level updates land (profiling run)")
     for name in ("inserts", "erases", "in_place", "missing"):
         what = {"inserts": "new level", "erases": "level removed", "in_place": "quantity changed",
                 "missing": "removal of a level not in the book"}[name]
@@ -174,6 +216,26 @@ def main():
     print(f"   mean book size over applied events: {p['bid_levels'] / p['events']:,.0f} bid levels, "
           f"{p['ask_levels'] / p['events']:,.0f} ask levels")
 
+    # 5. distance from the best price, in ticks
+    behind, ahead = sum(p["behind"]), sum(p["ahead"])
+    if behind + ahead + p["no_best"] != total:
+        sys.exit("profile error: the distance counts do not add up to the number of updates")
+    print(f"\n5. distance in ticks (1 tick = {1 / bookdata.PRICE_SCALE} USDT) from the best price of the same side, "
+          "just before each update")
+    print(f"   at or behind the best: {behind:,} ({100 * behind / total:.2f} %); better than the best: {ahead:,} "
+          f"({100 * ahead / total:.2f} %); side empty: {p['no_best']:,}")
+    print("   at or behind the best (share and cumulative share of ALL applied updates):")
+    print_buckets(p["behind"], total)
+    print("   better than the best, i.e. a new best price (share and cumulative share of ALL applied updates):")
+    print_buckets(p["ahead"], total)
+
+    # 6. erases of the best level: how far away is the next one?
+    erased_best = sum(p["next_gap"]) + p["last_level"]
+    print(f"\n6. updates that erase the best level itself: {erased_best:,} ({100 * erased_best / total:.2f} % of "
+          "applied updates); distance in ticks to the level that becomes the new best:")
+    if erased_best:
+        print_buckets(p["next_gap"], erased_best)
+    print(f"   the side had no other level: {p['last_level']:,}")
 
 if __name__ == "__main__":
     main()
