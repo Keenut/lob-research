@@ -4,6 +4,10 @@ Usage (PowerShell, from the repo root, after python etl.py):
     python replay.py                          # all converted hours, compare the top 100 levels per side
     python replay.py --max-files 2            # quick run on the first 2 hours
     python replay.py --top 1000 --csv docs\validation_top1000.csv
+    python replay.py --engine cpp             # same replay with the C++ engine (build cpp/ first)
+
+Engines: python (this file, the reference), cpp (C++ engine, vector book), cpp-map (C++ engine,
+std::map book). All three must print the same report except the last line (time and engine).
 
 Rules, per session (one WebSocket connection; every session starts with no book):
   * Events are processed in receive order. Snapshots are placed by their update id
@@ -239,13 +243,66 @@ def replay(events, snaps_by_session, top_n=100, on_update=None):
     return list(done.values())
 
 
+# ---------------------------------------------------------------- C++ engine (cpp/include/lob/replay.hpp)
+
+class CppSession:
+    """Results of one session from the C++ engine, with the attributes of SessionReplay. Prices and
+    quantities come back as integer ticks / lots and are converted to floats; ticks / PRICE_SCALE
+    is exactly the float that the exchange's decimal string gives, so the values compare equal."""
+
+    def __init__(self, d, price_scale, qty_scale):
+        for k in ("session", "first_rx", "last_rx", "events", "applied", "stale", "unsynced_events",
+                  "removed_missing", "unusable_snaps", "skipped_snaps", "snaps_after_end", "unsynced_ns"):
+            setattr(self, k, d[k])
+        self.gaps = list(d["gaps"])
+        self.syncs = list(d["syncs"])
+        if not self.syncs:                       # as SessionReplay: no sync, no depth
+            self.bid_floor = self.ask_cap = None
+        else:
+            self.bid_floor = d["bid_floor"] / price_scale if d["bid_floor"] is not None else float("inf")
+            self.ask_cap = d["ask_cap"] / price_scale if d["ask_cap"] is not None else float("-inf")
+        self.checks = []
+        for c in d["checks"]:
+            mm = [(side, p / price_scale, a / qty_scale, b / qty_scale, untracked)
+                  for side, p, a, b, untracked in c["mismatches"]]
+            self.checks.append(Check(self.session, c["snap_rx_ns"], c["last_update_id"], c["straddle"],
+                                     c["compared"], c["excluded"], [m[:4] for m in mm],
+                                     [m[:4] for m in mm if not m[4]], c["crossed"], c["book_levels"]))
+
+
+def run_cpp(base, stems, top_n=100, book="vector", on_events=None):
+    """Replay with the C++ engine, one hour at a time. on_events(stem, arrays, outputs), if given, receives
+    the input arrays and the per-event outputs (status, top of book) of each hour."""
+    import bookdata
+    import lobcpp
+
+    r = (lobcpp.VecReplayer if book == "vector" else lobcpp.MapReplayer)(top_n)
+    sn = bookdata.load_snapshots(base, stems)
+    r.set_snapshots(sn["rx"], sn["session"], sn["last_id"], sn["offsets"], sn["side"], sn["price"], sn["qty"])
+    for stem in stems:
+        ev = bookdata.load_events(base, stem)
+        out = r.process(ev["rx"], ev["session"], ev["first_id"], ev["last_id"], ev["offsets"],
+                        ev["side"], ev["price"], ev["qty"])
+        if on_events is not None:
+            on_events(stem, ev, out)
+    r.finish()
+    return [CppSession(d, bookdata.PRICE_SCALE, bookdata.QTY_SCALE) for d in r.sessions()]
+
+
+def session_summary(s):
+    """Every result of a session (Python or C++ engine) as plain values, to compare engines with ==."""
+    return (s.session, s.first_rx, s.last_rx, s.events, s.applied, s.stale, s.unsynced_events,
+            s.removed_missing, s.unusable_snaps, s.skipped_snaps, s.snaps_after_end, s.unsynced_ns,
+            tuple(s.gaps), tuple(s.syncs), s.bid_floor, s.ask_cap, tuple(s.checks))
+
+
 # ---------------------------------------------------------------- report
 
 def utc(rx_ns):
     return datetime.fromtimestamp(rx_ns / 1e9, timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
 
 
-def report(sessions, top_n, seconds):
+def report(sessions, top_n, seconds, engine="python"):
     keys = ("events", "applied", "stale", "unsynced", "gaps", "syncs", "checks", "bad_checks", "compared",
             "excluded", "mismatches", "unexplained", "crossed", "unusable", "after_end")
     tot = dict.fromkeys(keys, 0)
@@ -282,7 +339,7 @@ def report(sessions, top_n, seconds):
           f"unexplained={t['unexplained']:,}) checks_with_unexplained={t['bad_checks']} "
           f"excluded_ambiguous={t['excluded']:,} crossed_books={t['crossed']}")
     print(f"snapshots not compared: unusable={t['unusable']} after_session_end={t['after_end']}")
-    print(f"wall time {seconds:.1f} s incl. Parquet reading ({t['events'] / seconds:,.0f} events/s)")
+    print(f"wall time {seconds:.1f} s incl. Parquet reading ({t['events'] / seconds:,.0f} events/s, engine {engine})")
 
 
 def write_csv(sessions, path):
@@ -305,6 +362,8 @@ def main():
     ap.add_argument("--top", type=int, default=100, help="levels per side compared with each snapshot")
     ap.add_argument("--max-files", type=int, default=None, help="only the first N hour files")
     ap.add_argument("--csv", type=Path, default=None, help="write one row per snapshot check")
+    ap.add_argument("--engine", choices=("python", "cpp", "cpp-map"), default="python",
+                    help="python: reference; cpp / cpp-map: C++ engine with a vector / std::map book")
     a = ap.parse_args()
 
     base = a.parquet / a.symbol
@@ -313,10 +372,12 @@ def main():
         print(f"no Parquet files in {base / 'depth_events'} (run python etl.py first)")
         return
     t0 = time.time()
-    snaps = load_snapshots(base, stems)
-    sessions = replay(iter_depth_events(base, stems), snaps, a.top)
+    if a.engine == "python":
+        sessions = replay(iter_depth_events(base, stems), load_snapshots(base, stems), a.top)
+    else:
+        sessions = run_cpp(base, stems, a.top, "vector" if a.engine == "cpp" else "map")
     print(f"hours {stems[0]} .. {stems[-1]} ({len(stems)} files)\n")
-    report(sessions, a.top, time.time() - t0)
+    report(sessions, a.top, time.time() - t0, a.engine)
     if a.csv:
         write_csv(sessions, a.csv)
         print(f"wrote {a.csv}")

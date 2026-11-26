@@ -81,6 +81,13 @@ public:
         for (auto it = levels_.rbegin(); it != levels_.rend() && n > 0; ++it, --n) out.push_back(*it);
     }
 
+    // Call f(level) for each level from the best one on; stop as soon as f returns false.
+    template <class F>
+    void for_each_best_first(F f) const {
+        for (auto it = levels_.rbegin(); it != levels_.rend(); ++it)
+            if (!f(*it)) return;
+    }
+
     std::size_t size() const { return levels_.size(); }
     void clear() { levels_.clear(); }
 
@@ -112,6 +119,12 @@ public:
     void top(std::size_t n, std::vector<Level>& out) const {
         for (auto it = levels_.rbegin(); it != levels_.rend() && n > 0; ++it, --n)
             out.push_back(Level{it->first, it->second});
+    }
+
+    template <class F>
+    void for_each_best_first(F f) const {
+        for (auto it = levels_.rbegin(); it != levels_.rend(); ++it)
+            if (!f(Level{it->first, it->second})) return;
     }
 
     std::size_t size() const { return levels_.size(); }

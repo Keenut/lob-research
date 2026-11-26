@@ -1,10 +1,16 @@
-// bindings.cpp: the Python module 'lobcpp', exposing the C++ books of book.hpp with pybind11.
+// bindings.cpp: the Python module 'lobcpp', exposing book.hpp and replay.hpp with pybind11.
 //
 //     import lobcpp
 //     b = lobcpp.VecBook()            # or lobcpp.MapBook()
 //     b.load_snapshot(last_update_id, bid_prices, bid_qtys, ask_prices, ask_qtys)
 //     b.apply(sides, prices, qtys, last_id)   # one depth event; numpy arrays or lists of ints
 //     b.best(0), b.top(0, 10), b.size(1), b.crossed(), b.last_update_id
+//
+//     r = lobcpp.VecReplayer(top_n)   # or lobcpp.MapReplayer: the replay.py state machine
+//     r.set_snapshots(rx, session, last_id, offsets, side, price, qty)      # all snapshots, once
+//     out = r.process(rx, session, first_id, last_id, offsets, side, price, qty)  # e.g. one hour
+//     r.finish(); r.sessions()        # per-session results as dicts
+//     (bookdata.py builds these arrays from the Parquet tables.)
 //
 // Prices are integer ticks and quantities integer lots (see book.hpp). Arrays are passed without
 // copying when they already are C-contiguous int8 / int64 numpy arrays; anything else (a list,
@@ -14,12 +20,14 @@
 #include <pybind11/stl.h>
 
 #include <cstdint>
+#include <initializer_list>
 #include <optional>
 #include <stdexcept>
 #include <utility>
 #include <vector>
 
 #include "lob/book.hpp"
+#include "lob/replay.hpp"
 
 namespace py = pybind11;
 
@@ -87,8 +95,116 @@ static void bind_book(py::module_& m, const char* name) {
         .def_readwrite("last_update_id", &Book::last_update_id);
 }
 
+// Arrays in "CSR" layout: item i owns the levels [offsets[i], offsets[i + 1]) of side / price / qty.
+// Checked once here so that the C++ loops can trust them.
+static void check_csr(py::ssize_t n_items, const I64& offsets, const I8& side, const I64& price, const I64& qty) {
+    const py::ssize_t m = side.size();
+    if (offsets.size() != n_items + 1) throw std::invalid_argument("offsets must have one more element than the items");
+    if (price.size() != m || qty.size() != m) throw std::invalid_argument("side, price and qty must have the same length");
+    const std::int64_t* o = offsets.data();
+    if (o[0] != 0 || o[n_items] != m) throw std::invalid_argument("offsets must start at 0 and end at the number of levels");
+    for (py::ssize_t i = 0; i < n_items; ++i)
+        if (o[i + 1] < o[i]) throw std::invalid_argument("offsets must not decrease");
+    for (py::ssize_t k = 0; k < m; ++k) to_side(side.data()[k]);
+}
+
+static void check_len(py::ssize_t n, std::initializer_list<const I64*> arrays) {
+    for (const I64* a : arrays)
+        if (a->size() != n) throw std::invalid_argument("per-item arrays must have the same length");
+}
+
+static py::dict session_to_dict(const lob::SessionResult& s) {
+    py::list gaps, syncs, checks;
+    for (const lob::Gap& g : s.gaps) gaps.append(py::make_tuple(g.rx_ns, g.expected_first_id, g.got_first_id));
+    for (const lob::Sync& y : s.syncs) syncs.append(py::make_tuple(y.snap_rx_ns, y.event_rx_ns, y.last_update_id));
+    for (const lob::Check& c : s.checks) {
+        py::list mm;
+        for (const lob::Mismatch& x : c.mismatches)
+            mm.append(py::make_tuple(x.side, x.price, x.book_qty, x.snap_qty, x.untracked));
+        py::dict d;
+        d["snap_rx_ns"] = c.snap_rx_ns;
+        d["last_update_id"] = c.last_update_id;
+        d["straddle"] = c.straddle;
+        d["compared"] = c.compared;
+        d["excluded"] = c.excluded;
+        d["mismatches"] = mm;
+        d["crossed"] = c.crossed;
+        d["book_levels"] = c.book_levels;
+        checks.append(d);
+    }
+    py::dict d;
+    d["session"] = s.session;
+    d["first_rx"] = s.first_rx;
+    d["last_rx"] = s.last_rx;
+    d["events"] = s.events;
+    d["applied"] = s.applied;
+    d["stale"] = s.stale;
+    d["unsynced_events"] = s.unsynced_events;
+    d["removed_missing"] = s.removed_missing;
+    d["unusable_snaps"] = s.unusable_snaps;
+    d["skipped_snaps"] = s.skipped_snaps;
+    d["snaps_after_end"] = s.snaps_after_end;
+    d["unsynced_ns"] = s.unsynced_ns;
+    d["gaps"] = gaps;
+    d["syncs"] = syncs;
+    d["checks"] = checks;
+    d["bid_floor"] = s.bid_floor ? py::object(py::int_(*s.bid_floor)) : py::object(py::none());
+    d["ask_cap"] = s.ask_cap ? py::object(py::int_(*s.ask_cap)) : py::object(py::none());
+    return d;
+}
+
+template <class Book>
+static void bind_replayer(py::module_& m, const char* name) {
+    using R = lob::Replayer<Book>;
+    py::class_<R>(m, name)
+        .def(py::init<std::size_t>(), py::arg("top_n") = 100)
+        .def(
+            "set_snapshots",
+            [](R& r, const I64& rx, const I64& session, const I64& last_id, const I64& offsets, const I8& side,
+               const I64& price, const I64& qty) {
+                const py::ssize_t n = rx.size();
+                check_len(n, {&session, &last_id});
+                check_csr(n, offsets, side, price, qty);
+                r.set_snapshots(static_cast<std::size_t>(n), rx.data(), session.data(), last_id.data(),
+                                offsets.data(), side.data(), price.data(), qty.data());
+            },
+            "All REST snapshots, in receive order, before the first event.")
+        .def(
+            "process",
+            [](R& r, const I64& rx, const I64& session, const I64& first_id, const I64& last_id, const I64& offsets,
+               const I8& side, const I64& price, const I64& qty) {
+                const py::ssize_t n = rx.size();
+                check_len(n, {&session, &first_id, &last_id});
+                check_csr(n, offsets, side, price, qty);
+                py::array_t<std::int8_t> status(n);
+                py::array_t<std::int64_t> bid_px(n), bid_qty(n), ask_px(n), ask_qty(n);
+                r.process(static_cast<std::size_t>(n), rx.data(), session.data(), first_id.data(), last_id.data(),
+                          offsets.data(), side.data(), price.data(), qty.data(), status.mutable_data(),
+                          bid_px.mutable_data(), bid_qty.mutable_data(), ask_px.mutable_data(), ask_qty.mutable_data());
+                py::dict out;
+                out["status"] = status;  // 0 applied, 1 not synced, 2 stale
+                out["bid_px"] = bid_px;  // top of book after each event; 0 = none
+                out["bid_qty"] = bid_qty;
+                out["ask_px"] = ask_px;
+                out["ask_qty"] = ask_qty;
+                return out;
+            },
+            "Process consecutive depth events; returns per-event status and top of book.")
+        .def("finish", &R::finish, "Close the current session (after the last event).")
+        .def(
+            "sessions",
+            [](const R& r) {
+                py::list out;
+                for (const lob::SessionResult& s : r.sessions()) out.append(session_to_dict(s));
+                return out;
+            },
+            "Finished sessions as dicts (same fields as replay.SessionReplay; prices in ticks, qty in lots).");
+}
+
 PYBIND11_MODULE(lobcpp, m) {
-    m.doc() = "C++ L2 order book with integer ticks and lots (see cpp/include/lob/book.hpp)";
+    m.doc() = "C++ L2 order book and replay engine with integer ticks and lots (see cpp/include/lob/)";
     bind_book<lob::VecBook>(m, "VecBook");
     bind_book<lob::MapBook>(m, "MapBook");
+    bind_replayer<lob::VecBook>(m, "VecReplayer");
+    bind_replayer<lob::MapBook>(m, "MapReplayer");
 }
