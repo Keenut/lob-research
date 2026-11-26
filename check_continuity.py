@@ -1,7 +1,10 @@
 r"""check_continuity.py: verify Binance depth-stream sequence continuity in the raw recorder logs.
 
 Usage (PowerShell):
-    python check_continuity.py data\raw\BTCUSDT\*.log
+    python check_continuity.py data\raw\BTCUSDT\*.log*
+
+The pattern *.log* takes both plain (.log) and compressed (.log.gz, see compress_raw.py) hours;
+files are processed in hour order whatever order they are given in.
 
 Within each session (one WebSocket connection) it applies the Binance local order book rules:
   1. Events that arrive before the first usable snapshot are buffered.
@@ -28,10 +31,12 @@ from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
+from etl import hour_of, open_raw
+
 
 def read_records(paths):
     for p in paths:
-        with open(p, encoding="utf-8") as f:
+        with open_raw(p) as f:
             for line in f:
                 parts = line.rstrip("\n").split(" ", 3)
                 if len(parts) < 4:
@@ -175,4 +180,4 @@ if __name__ == "__main__":
     for arg in sys.argv[1:]:
         p = Path(arg)
         files += sorted(p.parent.glob(p.name)) if "*" in p.name else [p]
-    check(files)
+    check(sorted(files, key=hour_of))

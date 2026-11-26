@@ -56,7 +56,8 @@ pip install -r requirements.txt
 
 python recorder.py                                   # terminal 1: records and reconnects by itself
 python etl.py                                        # terminal 2: converts every finished UTC hour
-python check_continuity.py data\raw\BTCUSDT\*.log    # sequence gaps, holes between sessions, errors
+python check_continuity.py data\raw\BTCUSDT\*.log*   # sequence gaps, holes between sessions, errors
+python compress_raw.py                               # gzip finished raw hours (lossless, verified)
 python replay.py                                     # rebuilds the book, validates the top 100 levels
 python clock.py                                      # clock offset and corrected latency
 python explore.py                                    # DuckDB sanity, latency spike and clock step queries
@@ -67,7 +68,9 @@ python -m pytest -q                                  # tests
 
 ### Raw logs: `data/raw/<SYMBOL>/<YYYY-MM-DDTHH>.log` (git-ignored)
 
-One record per line: `<rx_ns> <session> <kind> <payload>`
+One record per line: `<rx_ns> <session> <kind> <payload>`. Finished hours can be gzip-compressed to
+`<YYYY-MM-DDTHH>.log.gz` by `compress_raw.py` (lossless: the decompressed bytes are checked against
+the original with SHA-256 before the `.log` is deleted); `etl.py` and `check_continuity.py` read both.
 
 | Field | Meaning |
 |---|---|
@@ -260,6 +263,7 @@ Corrected one-way latency, last session (21:46–22:59, 100 % covered by clock s
 | `recorder.py` | asyncio recorder: WebSocket depth + trades, REST snapshots, clock samples, reconnection with backoff |
 | `check_continuity.py` | sequence continuity per session, holes between sessions, logged errors, raw latency (reads raw logs) |
 | `etl.py` | raw logs → Parquet tables, one file per table per UTC hour |
+| `compress_raw.py` | gzip finished raw hours, verified, to save disk space |
 | `explore.py` | DuckDB queries: row counts, gaps cross-check, trades, errors, latency spikes, clock steps |
 | `book.py` | reference L2 book (two dicts) and top-N comparison with a snapshot |
 | `replay.py` | per-session sync / gap / resync state machine, snapshot validation, mismatch classification |
