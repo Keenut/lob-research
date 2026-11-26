@@ -187,18 +187,29 @@ Window: 24 UTC hour files, first depth message 2026-11-24 23:02:12, last 2026-11
 - 73 clock samples over 1.21 h; RTT min / p50 / p99 = 223 / 249 / 5544 ms; 12 good samples
   (RTT <= 243 ms).
 - Offset (Binance − PC) median 216.6 ms: the PC clock was behind. Bounds width about 243 ms.
-- **Drift +73.8 ms/h** (linear fit on the good samples; +69.9 ms/h with a 40 ms RTT slack), about
-  20 ppm. Between clock steps, the raw `rx − E` session medians fall at about the same rate
-  (≈ 75 ms/h, from session medians and session mid-times).
-- **Clock steps** (the PC clock set at once):
-  - at 19:29 the per-minute median of `rx − E` jumped from −1424 to +112 ms and stayed there (+1536 ms);
-  - between 23:07 and 23:18 on 2026-11-24 (during the first manual restart) the session median went
-    from −1813 to +36 ms, about +1.85 s.
+- **Clock steps**, confirmed by the Windows event log ([`windows_time_events.txt`](docs/windows_time_events.txt):
+  System log, Kernel-General event 1; both changes were made by `svchost.exe`, the process that hosts
+  the Windows Time service):
 
-  Cause not yet verified (a time-service resynchronisation would produce this pattern).
-- Consequence: uncorrected `rx − E` is not comparable across hours, and sessions before 21:46 on
-  2026-11-25 cannot be corrected (no clock samples; extrapolating the drift across unknown steps is
-  not reliable).
+  | Time (UTC) | Step in the event log | Estimate from the market data alone |
+  |---|---|---|
+  | 2026-11-24 23:12:18 | +1,936 ms | +1,933 ms: session medians of `rx − E` −1813 → +36 ms across the first manual restart, plus 1.13 h of drift at ≈ 75 ms/h |
+  | 2026-11-25 19:29:25 | +1,539 ms | +1,536 ms: per-minute median of `rx − E` −1424 → +112 ms, and it stays there |
+
+- **Drift: three estimates agree.** +73.8 ms/h from a linear fit on the good clock samples (+69.9 ms/h
+  with a 40 ms RTT slack); ≈ 75 ms/h from the session medians of `rx − E` between the steps (session
+  mid-times); 75.9 ms/h from the event log (1,539 ms accumulated in the 20.29 h between the two syncs,
+  assuming the first one set the clock exactly). About 20 ppm.
+- **Offset cross-check.** 75.9 ms/h over the 3.0 h from the 19:29 sync to 22:30 predicts an offset of
+  228 ms; the clock samples give 223–224 ms (median offset over 22:00–23:00). The agreement within about
+  5 ms suggests that the path asymmetry to Binance is small, but it rests on the accuracy of Windows'
+  own time sync, which is not measured here.
+- The same log has no sleep/resume or boot event during the window: the last time Windows restored the
+  clock from the hardware clock was 2026-11-24 22:43:54, before recording started.
+- Consequence: uncorrected `rx − E` is not comparable across hours. Sessions before 21:46 on
+  2026-11-25 have no clock samples. The event-log steps and the 75.9 ms/h drift would allow a
+  piecewise-linear correction of them; it is not done here because it would rest entirely on the
+  accuracy of Windows' own time sync.
 
 ### Latency ([`clock_report.txt`](docs/clock_report.txt), [`explore_report.txt`](docs/explore_report.txt))
 
@@ -230,8 +241,11 @@ Corrected one-way latency, last session (21:46–22:59, 100 % covered by clock s
 - After a sequence gap the book would wait for the next snapshot, up to 10 min (no gap occurred here).
 - One machine, one connection: every reconnect leaves a hole (81.2 s for 4 reconnects here). A second,
   independent recorder could fill them.
-- Clock: the absolute one-way latency is uncertain by about ±RTT/2 (≈ ±120 ms); clock samples exist
-  only from 21:46 on 2026-11-25; the PC clock drifts about 20 ppm and was stepped twice in the window.
+- Clock: the absolute one-way latency is uncertain by about ±RTT/2 (≈ ±120 ms) from the clock samples
+  alone; clock samples exist only from 21:46 on 2026-11-25; the PC clock drifts about 20 ppm and was
+  stepped twice in the window. `clock.py` interpolates linearly between good samples, so a future step
+  would be smeared over the interval between the two samples around it (minutes); such steps can be
+  located with the event log or the per-minute medians in `explore.py`.
 - `rx_ns` is distorted by stalls of up to about 20 s.
 - The recorder writes through a 64 KiB buffer: a crash can lose the last buffered lines (the ETL and
   the checker skip a truncated last line).
@@ -265,6 +279,7 @@ Reports in `docs/` and the commands that produced them:
 | `replay_top5000.txt`, `validation_top5000.csv` | `python replay.py --top 5000 --csv docs\validation_top5000.csv` |
 | `clock_report.txt` | `python clock.py` |
 | `clock_report_slack40.txt` | `python clock.py --slack-ms 40` |
+| `windows_time_events.txt` | `Get-WinEvent` on the System log, Kernel-General event 1 (times in the `TimeCreated` lines are local, UTC+1; message language: Turkish) |
 
 ## References
 
