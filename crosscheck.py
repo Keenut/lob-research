@@ -1,5 +1,6 @@
-r"""crosscheck.py: run the Python reference and the C++ engines (vector, std::map and price ladder books)
-on the same Parquet hours and check that they agree exactly (differential testing on real data).
+r"""crosscheck.py: run the Python reference and the C++ engines (vector, std::map and price ladder books;
+the ladder with both window sizes considered for BTCUSDT, 2^16 and 2^18 ticks) on the same Parquet hours
+and check that they agree exactly (differential testing on real data).
 
 Usage (PowerShell, from the repo root, after building cpp/):
     python crosscheck.py                          # all converted hours, top 100 levels per side
@@ -8,9 +9,10 @@ Usage (PowerShell, from the repo root, after building cpp/):
 
 What is compared:
   1. every session result (event counts, gaps, syncs, every snapshot check with its full mismatch
-     lists): python == cpp (vector book) == cpp (std::map book) == cpp (price ladder);
+     lists): python == cpp (vector book) == cpp (std::map book) == cpp (price ladder, 2^16 ticks)
+     == cpp (price ladder, 2^18 ticks);
   2. the status and the top of book (best bid / ask with quantities) after EVERY event:
-     cpp vector == cpp map and cpp vector == cpp ladder;
+     cpp vector == each of the other C++ engines;
   3. the same top of book in the Python reference at every --every-th applied event (in Python the
      best price is a max() over every level of a dict, too slow to do after each event).
 Exit code 0 when everything agrees, 1 otherwise.
@@ -24,7 +26,9 @@ import numpy as np
 
 import replay
 
-ENGINES = ("vector", "map", "ladder")   # keys of replay.CPP_REPLAYERS
+# Keys of replay.CPP_REPLAYERS. Both ladder windows are named explicitly, so that both are checked
+# whichever one is the default (lobcpp.LadderReplayer, see ladder_log2_slots).
+ENGINES = ("vector", "map", "ladder16", "ladder18")
 FIELDS = ("session", "first_rx", "last_rx", "events", "applied", "stale", "unsynced_events", "removed_missing",
           "unusable_snaps", "skipped_snaps", "snaps_after_end", "unsynced_ns", "gaps", "syncs", "bid_floor",
           "ask_cap", "checks")   # the order of replay.session_summary()

@@ -14,7 +14,11 @@ What it measures:
   2. the same on the first --python-hours hours for the C++ engines AND the Python reference
      (replay.replay on events already read into memory): a like-for-like speed-up;
   3. time per applied event (mean, p50, p90, p99, p99.9, max) from a separate run with per-event timing
-     on (steady_clock around each event; its measured resolution is printed);
+     on (steady_clock around each event; its measured resolution is printed), for the vector, the map and
+     every ladder window. Then the same events split by what else happened in them: a sync (the book
+     loaded from a REST snapshot), a check against a snapshot, a move of a ladder's window, or none of
+     these, with the slowest of the last group. The moves are counted per event in one more, untimed
+     run per ladder that gives the engine one event at a time (slow: a few seconds per ladder);
   4. where the level updates land in the book (a separate profiling run): inserts / erases / in-place
      changes / removals of missing levels, and how many levels are better than the updated price.
      For the sorted vector an insert or erase shifts exactly that many elements: this is what explains
@@ -42,7 +46,8 @@ import bookdata
 import replay
 
 ARRAYS = ("rx", "session", "first_id", "last_id", "offsets", "side", "price", "qty")
-LADDERS = ("ladder12", "ladder14", "ladder16", "ladder18")   # price ladders compared in section 1
+LADDERS = ("ladder12", "ladder14", "ladder16", "ladder18")   # price ladders compared in sections 1 and 3
+OTHER, MOVE, CHECK, SYNC = 0, 1, 2, 3   # what else happened in an event (section 3): the highest that applies
 
 
 def cpu_name():
@@ -213,13 +218,109 @@ def timings(a, base, stems, hours, snaps, n_events, n_levels):
     res = lobcpp.clock_resolution_ns()
     print(f"\n3. time per applied event in microseconds (separate run with timing on; clock resolution {res} ns)")
     print(f"   {'engine':<17} {'mean':>8} {'p50':>8} {'p90':>8} {'p99':>8} {'p99.9':>8} {'max':>9}")
-    for book in ("vector", "map", "ladder"):
-        _, _, outs = run_cpp(book, hours, snaps, a.top, timings=True)
-        ns = np.concatenate([o["ns"] for o in outs])[np.concatenate([o["status"] for o in outs]) == 0]
-        q = np.percentile(ns, [50, 90, 99, 99.9]) / 1e3
-        print(f"   {name_of(book):<17} {ns.mean() / 1e3:8.2f} {q[0]:8.2f} {q[1]:8.2f} {q[2]:8.2f} {q[3]:8.2f} "
-              f"{ns.max() / 1e3:9.1f}")
+    timed = {}   # engine -> (ns per event, applied mask, sessions): for the split below
+    for book in ("vector", "map") + LADDERS:
+        _, r, outs = run_cpp(book, hours, snaps, a.top, timings=True)
+        ns = np.concatenate([o["ns"] for o in outs])
+        applied = np.concatenate([o["status"] for o in outs]) == 0
+        timed[book] = (ns, applied, r.sessions())
+        x = ns[applied]
+        q = np.percentile(x, [50, 90, 99, 99.9]) / 1e3
+        print(f"   {name_of(book):<17} {x.mean() / 1e3:8.2f} {q[0]:8.2f} {q[1]:8.2f} {q[2]:8.2f} {q[3]:8.2f} "
+              f"{x.max() / 1e3:9.1f}")
+    split_by_kind(a, hours, snaps, timed)
     print()
+
+
+def snapshot_events(sessions, session, last_id, rx):
+    """Indices of the events at which the replay used a snapshot, as two lists: syncs and checks.
+    sessions: r.sessions() of a C++ engine; session, last_id, rx: per event, all hours concatenated.
+    replay.hpp uses the snapshot with update id L at the first event of its session with u > L."""
+    syncs, checks = [], []
+    for s in sessions:
+        idx = np.flatnonzero(session == s["session"])   # this session's events, in replay order
+        u = last_id[idx]
+
+        def at(L):
+            later = u > L
+            if not later.any():
+                sys.exit(f"internal error: no event after update id {L} in session {s['session']}")
+            return int(idx[np.argmax(later)])           # argmax of a bool array: the first True
+
+        for _, event_rx, L in s["syncs"]:
+            i = at(L)
+            if rx[i] != event_rx:                        # the engine also reports the rx of its sync event
+                sys.exit(f"internal error: sync at update id {L} of session {s['session']} not found")
+            syncs.append(i)
+        checks += [at(c["last_update_id"]) for c in s["checks"]]
+    return syncs, checks
+
+
+def moves_per_event(book, hours, snaps, top_n):
+    """Window moves of a price ladder in each event (both sides), from one more replay, untimed, that
+    gives the engine one event at a time and reads its move counters after each event. Exact, but the
+    Python loop around every event makes it slow."""
+    r = replay.cpp_replayer(book, top_n)
+    r.set_snapshots(snaps["rx"], snaps["session"], snaps["last_id"], snaps["offsets"], snaps["side"],
+                    snaps["price"], snaps["qty"])
+    moves, before = [], 0
+    for h in hours:
+        off = h["offsets"]
+        for i in range(len(h["rx"])):
+            b, e = off[i], off[i + 1]                    # this event's levels
+            one = slice(i, i + 1)
+            r.process(h["rx"][one], h["session"][one], h["first_id"][one], h["last_id"][one],
+                      np.array([0, e - b], dtype=np.int64), h["side"][b:e], h["price"][b:e], h["qty"][b:e])
+            st = r.ladder_stats()
+            now = st["shifts_up"] + st["shifts_down"]   # moves since the start of the replay
+            moves.append(now - before)
+            before = now
+    r.finish()
+    return np.array(moves)
+
+
+def split_by_kind(a, hours, snaps, timed):
+    """Section 3, continued: the timed events by what else happened in them (OTHER .. SYNC above)."""
+    rx = np.concatenate([h["rx"] for h in hours])
+    session = np.concatenate([h["session"] for h in hours])
+    last_id = np.concatenate([h["last_id"] for h in hours])
+    levels = np.concatenate([np.diff(h["offsets"]) for h in hours])   # level updates per event
+    print("\n   the same applied events by what else happened in them (n = number of events, median and max in")
+    print("   microseconds; an event is counted once, in the first of these that applies):")
+    print("      sync:  the book was loaded from a REST snapshot (at the start of a session, or after a gap)")
+    print(f"      check: the book was compared with a snapshot ({a.top} levels per side)")
+    print("      move:  the window of the price ladder moved, on either side (counted per event in one more,")
+    print("             untimed run per ladder; that run is slow)")
+    print(f"   {'engine':<17} {'sync: n':>8} {'median':>7} {'max':>7}   {'check: n':>8} {'median':>7} {'max':>7}   "
+          f"{'move: n':>8} {'median':>7} {'max':>7}")
+    others = []
+    for book, (ns, applied, sessions) in timed.items():
+        kind = np.full(len(ns), OTHER)
+        ladder = book.startswith("ladder")
+        if ladder:
+            kind[moves_per_event(book, hours, snaps, a.top) > 0] = MOVE
+        syncs, checks = snapshot_events(sessions, session, last_id, rx)
+        kind[checks] = CHECK
+        kind[syncs] = SYNC
+        cells = []
+        for k in (SYNC, CHECK, MOVE):
+            x = ns[applied & (kind == k)] / 1e3
+            if k == MOVE and not ladder:
+                cells.append(f"{'-':>8} {'':>7} {'':>7}")      # no window to move
+            elif len(x) == 0:
+                cells.append(f"{0:>8} {'-':>7} {'-':>7}")
+            else:
+                cells.append(f"{len(x):>8,} {np.median(x):7.1f} {x.max():7.1f}")
+        print(f"   {name_of(book):<17} " + "   ".join(cells).rstrip())
+        rest = np.flatnonzero(applied & (kind == OTHER))
+        others.append((book, ns[rest], rest[np.argmax(ns[rest])]))
+
+    print(f"\n   all other applied events (no sync, check or move; an event has {levels.mean():.0f} level updates "
+          "on average):")
+    print(f"   {'engine':<17} {'p99.9':>8} {'max':>8}   {'slowest event: level updates':>29}  received")
+    for book, x, i in others:
+        print(f"   {name_of(book):<17} {np.percentile(x, 99.9) / 1e3:8.2f} {x.max() / 1e3:8.1f}   "
+              f"{levels[i]:>29,}  {replay.utc(rx[i])}")
 
 
 def profile_report(a, hours, snaps):
