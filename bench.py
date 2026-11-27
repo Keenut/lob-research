@@ -1,5 +1,5 @@
-r"""bench.py: speed of the C++ replay engine (vector book and std::map book) and of the Python reference,
-on data already in memory: reading and converting the Parquet files is NOT timed.
+r"""bench.py: speed of the C++ replay engine (vector book, std::map book, price ladder) and of the Python
+reference, on data already in memory: reading and converting the Parquet files is NOT timed.
 
 Usage (PowerShell, from the repo root, after building cpp/ in Release):
     python bench.py                                   # all converted hours
@@ -9,6 +9,8 @@ Usage (PowerShell, from the repo root, after building cpp/ in Release):
 What it measures:
   1. throughput on all hours: wall time of the process() calls only (the replay state machine, the book
      updates, the snapshot checks and the top-of-book output), median of --repeat runs after a warm-up;
+     the price ladder with windows of 2^12 to 2^18 ticks, and for each window how many level updates
+     went to its std::map and how often the window moved (one more, untimed run);
   2. the same on the first --python-hours hours for the C++ engines AND the Python reference
      (replay.replay on events already read into memory): a like-for-like speed-up;
   3. time per applied event (mean, p50, p90, p99, p99.9, max) from a separate run with per-event timing
@@ -40,6 +42,7 @@ import bookdata
 import replay
 
 ARRAYS = ("rx", "session", "first_id", "last_id", "offsets", "side", "price", "qty")
+LADDERS = ("ladder12", "ladder14", "ladder16", "ladder18")   # price ladders compared in section 1
 
 
 def cpu_name():
@@ -63,9 +66,7 @@ def cpu_name():
 
 def run_cpp(book, hours, snaps, top_n, timings=False, profile=False):
     """One full replay. Returns (seconds spent in process(), replayer, per-hour outputs)."""
-    import lobcpp
-
-    r = (lobcpp.VecReplayer if book == "vector" else lobcpp.MapReplayer)(top_n, profile=profile)
+    r = replay.cpp_replayer(book, top_n, profile)
     r.set_snapshots(snaps["rx"], snaps["session"], snaps["last_id"], snaps["offsets"],
                     snaps["side"], snaps["price"], snaps["qty"])
     seconds, outs = 0.0, []
@@ -76,6 +77,19 @@ def run_cpp(book, hours, snaps, top_n, timings=False, profile=False):
         outs.append(out)
     r.finish()
     return seconds, r, outs
+
+
+def name_of(book):
+    """Display name of an engine (a key of replay.CPP_REPLAYERS)."""
+    if book.startswith("ladder"):
+        import lobcpp
+
+        return f"cpp ladder 2^{book[len('ladder'):] or lobcpp.ladder_log2_slots}"
+    return f"cpp {book}"
+
+
+def size_text(nbytes):
+    return f"{nbytes / 1024:,.0f} KiB" if nbytes < 1 << 20 else f"{nbytes / (1 << 20):,.0f} MiB"
 
 
 def median_time(fn, repeat):
@@ -154,9 +168,23 @@ def timings(a, base, stems, hours, snaps, n_events, n_levels):
 
     # 1. throughput on all hours
     print(f"1. throughput, all hours (process() calls only; median of {a.repeat} runs after 1 warm-up)")
-    for book in ("vector", "map"):
+    for book in ("vector", "map") + LADDERS:
         med, times = median_time(lambda: run_cpp(book, hours, snaps, a.top)[0], a.repeat)
-        print(line(f"cpp {book}", med, n_events, n_levels) + f"   runs: {', '.join(f'{t:.3f}' for t in times)}")
+        print(line(name_of(book), med, n_events, n_levels) + f"   runs: {', '.join(f'{t:.3f}' for t in times)}")
+
+    # where the ladders' level updates went (one more run each, untimed)
+    applied = None
+    print("\n   price ladder by window size (one more run each, untimed):")
+    print(f"      {'window':>8} {'= USDT':>10} {'array per side':>15} {'updates via std::map':>21} "
+          f"{'window moves up':>16} {'down':>6}")
+    for book in LADDERS:
+        _, r, outs = run_cpp(book, hours, snaps, a.top)
+        if applied is None:   # level updates of the applied events (the same for every engine)
+            applied = sum(int(np.diff(h["offsets"])[o["status"] == 0].sum()) for h, o in zip(hours, outs))
+        st = r.ladder_stats()
+        print(f"      {'2^' + book[len('ladder'):]:>8} {st['slots'] / bookdata.PRICE_SCALE:>10,.2f} "
+              f"{size_text(8 * st['slots']):>15} {st['deep_sets']:>12,} ({100 * st['deep_sets'] / applied:5.2f} %) "
+              f"{st['shifts_up']:>16,} {st['shifts_down']:>6,}")
 
     # 2. same subset, with the Python reference
     k = min(a.python_hours, len(stems))
@@ -176,20 +204,20 @@ def timings(a, base, stems, hours, snaps, n_events, n_levels):
     print(f"\n2. same data for every engine: the first {k} hour(s), {sub_events:,} events, {sub_levels:,} level updates")
     py_med, _ = median_time(run_python, a.repeat)
     print(line("python reference", py_med, sub_events, sub_levels, py_med))
-    for book in ("vector", "map"):
+    for book in ("vector", "map", "ladder"):
         med, _ = median_time(lambda: run_cpp(book, sub_hours, sub_snaps, a.top)[0], a.repeat)
-        print(line(f"cpp {book}", med, sub_events, sub_levels, py_med))
+        print(line(name_of(book), med, sub_events, sub_levels, py_med))
     print("   (xN: speed-up over the Python reference on the same events)")
 
     # 3. time per applied event
     res = lobcpp.clock_resolution_ns()
     print(f"\n3. time per applied event in microseconds (separate run with timing on; clock resolution {res} ns)")
     print(f"   {'engine':<17} {'mean':>8} {'p50':>8} {'p90':>8} {'p99':>8} {'p99.9':>8} {'max':>9}")
-    for book in ("vector", "map"):
+    for book in ("vector", "map", "ladder"):
         _, _, outs = run_cpp(book, hours, snaps, a.top, timings=True)
         ns = np.concatenate([o["ns"] for o in outs])[np.concatenate([o["status"] for o in outs]) == 0]
         q = np.percentile(ns, [50, 90, 99, 99.9]) / 1e3
-        print(f"   {'cpp ' + book:<17} {ns.mean() / 1e3:8.2f} {q[0]:8.2f} {q[1]:8.2f} {q[2]:8.2f} {q[3]:8.2f} "
+        print(f"   {name_of(book):<17} {ns.mean() / 1e3:8.2f} {q[0]:8.2f} {q[1]:8.2f} {q[2]:8.2f} {q[3]:8.2f} "
               f"{ns.max() / 1e3:9.1f}")
     print()
 

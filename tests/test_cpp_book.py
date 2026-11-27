@@ -1,5 +1,6 @@
-"""Differential tests: the C++ books (lobcpp.VecBook, lobcpp.MapBook) against the Python reference
-(book.L2Book) on random depth events, comparing the WHOLE book after every event.
+"""Differential tests: the C++ books (lobcpp.VecBook, MapBook, LadderBook, and Ladder3Book whose window of
+8 ticks moves all the time) against the Python reference (book.L2Book) on random depth events, comparing
+the WHOLE book after every event.
 
 Skipped when the C++ module has not been built (see cpp/CMakeLists.txt). The Python reference is
 fed the same integer ticks and lots as the C++ books, so equality is exact.
@@ -14,6 +15,7 @@ from book import ASK, BID, L2Book
 lobcpp = pytest.importorskip("lobcpp")
 
 ALL = 10**9   # "all levels" for top()
+BOOKS = ("VecBook", "MapBook", "LadderBook", "Ladder3Book")
 
 
 def random_events(rng, n_events, start_mid=1_000_000, width=200):
@@ -47,7 +49,7 @@ def test_cpp_books_equal_python_reference_after_every_event(seed):
     snap_bids = {1_000_000 - k: rng.randint(1, 10**8) for k in range(1, 100)}
     snap_asks = {1_000_000 + k: rng.randint(1, 10**8) for k in range(1, 100)}
     py = L2Book.from_snapshot(41, snap_bids.items(), snap_asks.items())
-    cpp = [cls() for cls in (lobcpp.VecBook, lobcpp.MapBook)]
+    cpp = [getattr(lobcpp, name)() for name in BOOKS]
     for b in cpp:
         b.load_snapshot(41, list(snap_bids), list(snap_bids.values()), list(snap_asks), list(snap_asks.values()))
 
@@ -61,11 +63,13 @@ def test_cpp_books_equal_python_reference_after_every_event(seed):
             assert b.top(BID, ALL) == py.top(BID, ALL)       # every level, best first
             assert b.top(ASK, ALL) == py.top(ASK, ALL)
             assert b.crossed() == py.crossed()
+    st = cpp[BOOKS.index("Ladder3Book")].ladder_stats()     # the small window really moved
+    assert st["shifts_up"] > 0 and st["shifts_down"] > 0 and st["deep_sets"] > 0
 
 
 def test_cpp_best_and_empty_sides():
-    for cls in (lobcpp.VecBook, lobcpp.MapBook):
-        b = cls()
+    for name in BOOKS:
+        b = getattr(lobcpp, name)()
         assert b.best(BID) is None and b.best(ASK) is None and not b.crossed()
         assert b.last_update_id == -1
         b.load_snapshot(7, [99, 98], [1, 0], [101], [5])     # the qty-0 level is skipped
@@ -75,6 +79,8 @@ def test_cpp_best_and_empty_sides():
         assert b.set(ASK, 99, 0) and not b.crossed()
         assert b.set(BID, 99, 0) and not b.set(BID, 99, 0)  # second removal: level missing
         assert b.best(BID) is None
+        assert b.set(BID, 50, 3) and b.best(BID) == (50, 3)  # first level of an empty side, far from before
+        assert b.top(BID, 5) == [(50, 3)] and b.size(BID) == 1
 
 
 def test_cpp_rejects_bad_input():

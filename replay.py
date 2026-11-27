@@ -7,7 +7,8 @@ Usage (PowerShell, from the repo root, after python etl.py):
     python replay.py --engine cpp             # same replay with the C++ engine (build cpp/ first)
 
 Engines: python (this file, the reference), cpp (C++ engine, vector book), cpp-map (C++ engine,
-std::map book). All three must print the same report except the last line (time and engine).
+std::map book), cpp-ladder (C++ engine, price ladder). All four must print the same report except
+the last line (time and engine).
 
 Rules, per session (one WebSocket connection; every session starts with no book):
   * Events are processed in receive order. Snapshots are placed by their update id
@@ -270,13 +271,27 @@ class CppSession:
                                      [m[:4] for m in mm if not m[4]], c["crossed"], c["book_levels"]))
 
 
+# C++ replay engines (classes of the lobcpp module) by book container. "ladder" is the price ladder with
+# the window chosen for BTCUSDT (2^16 ticks); "ladderN" has a window of 2^N ticks (N = 3: for the tests,
+# the window moves all the time; N = 12 .. 18: for the window-size comparison in bench.py).
+CPP_REPLAYERS = {"vector": "VecReplayer", "map": "MapReplayer", "ladder": "LadderReplayer",
+                 "ladder3": "Ladder3Replayer", "ladder12": "Ladder12Replayer", "ladder14": "Ladder14Replayer",
+                 "ladder16": "Ladder16Replayer", "ladder18": "Ladder18Replayer"}
+
+
+def cpp_replayer(book, top_n=100, profile=False):
+    """A new C++ replay engine with the given book container (a key of CPP_REPLAYERS)."""
+    import lobcpp
+
+    return getattr(lobcpp, CPP_REPLAYERS[book])(top_n, profile)
+
+
 def run_cpp(base, stems, top_n=100, book="vector", on_events=None):
     """Replay with the C++ engine, one hour at a time. on_events(stem, arrays, outputs), if given, receives
     the input arrays and the per-event outputs (status, top of book) of each hour."""
     import bookdata
-    import lobcpp
 
-    r = (lobcpp.VecReplayer if book == "vector" else lobcpp.MapReplayer)(top_n)
+    r = cpp_replayer(book, top_n)
     sn = bookdata.load_snapshots(base, stems)
     r.set_snapshots(sn["rx"], sn["session"], sn["last_id"], sn["offsets"], sn["side"], sn["price"], sn["qty"])
     for stem in stems:
@@ -362,8 +377,9 @@ def main():
     ap.add_argument("--top", type=int, default=100, help="levels per side compared with each snapshot")
     ap.add_argument("--max-files", type=int, default=None, help="only the first N hour files")
     ap.add_argument("--csv", type=Path, default=None, help="write one row per snapshot check")
-    ap.add_argument("--engine", choices=("python", "cpp", "cpp-map"), default="python",
-                    help="python: reference; cpp / cpp-map: C++ engine with a vector / std::map book")
+    ap.add_argument("--engine", choices=("python", "cpp", "cpp-map", "cpp-ladder"), default="python",
+                    help="python: reference; cpp / cpp-map / cpp-ladder: C++ engine with a vector / "
+                         "std::map / price ladder book")
     a = ap.parse_args()
 
     base = a.parquet / a.symbol
@@ -375,7 +391,7 @@ def main():
     if a.engine == "python":
         sessions = replay(iter_depth_events(base, stems), load_snapshots(base, stems), a.top)
     else:
-        sessions = run_cpp(base, stems, a.top, "vector" if a.engine == "cpp" else "map")
+        sessions = run_cpp(base, stems, a.top, {"cpp": "vector", "cpp-map": "map", "cpp-ladder": "ladder"}[a.engine])
     print(f"hours {stems[0]} .. {stems[-1]} ({len(stems)} files)\n")
     report(sessions, a.top, time.time() - t0, a.engine)
     if a.csv:

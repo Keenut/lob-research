@@ -1,5 +1,5 @@
-r"""crosscheck.py: run the Python reference and both C++ engines on the same Parquet hours and check that
-they agree exactly (differential testing on real data).
+r"""crosscheck.py: run the Python reference and the C++ engines (vector, std::map and price ladder books)
+on the same Parquet hours and check that they agree exactly (differential testing on real data).
 
 Usage (PowerShell, from the repo root, after building cpp/):
     python crosscheck.py                          # all converted hours, top 100 levels per side
@@ -8,9 +8,9 @@ Usage (PowerShell, from the repo root, after building cpp/):
 
 What is compared:
   1. every session result (event counts, gaps, syncs, every snapshot check with its full mismatch
-     lists): python == cpp (vector book) == cpp (std::map book);
+     lists): python == cpp (vector book) == cpp (std::map book) == cpp (price ladder);
   2. the status and the top of book (best bid / ask with quantities) after EVERY event:
-     cpp vector == cpp map;
+     cpp vector == cpp map and cpp vector == cpp ladder;
   3. the same top of book in the Python reference at every --every-th applied event (in Python the
      best price is a max() over every level of a dict, too slow to do after each event).
 Exit code 0 when everything agrees, 1 otherwise.
@@ -24,6 +24,7 @@ import numpy as np
 
 import replay
 
+ENGINES = ("vector", "map", "ladder")   # keys of replay.CPP_REPLAYERS
 FIELDS = ("session", "first_rx", "last_rx", "events", "applied", "stale", "unsynced_events", "removed_missing",
           "unusable_snaps", "skipped_snaps", "snaps_after_end", "unsynced_ns", "gaps", "syncs", "bid_floor",
           "ask_cap", "checks")   # the order of replay.session_summary()
@@ -79,7 +80,7 @@ def main():
 
     # 2. C++ engines, keeping the per-event outputs of every hour
     cpp = {}
-    for book in ("vector", "map"):
+    for book in ENGINES:
         outs = []
         t0 = time.time()
         sessions = replay.run_cpp(base, stems, a.top, book, on_events=lambda stem, ev, out: outs.append(out))
@@ -89,7 +90,7 @@ def main():
     # 3. comparisons
     ok = True
     want = [replay.session_summary(s) for s in py]
-    for book in ("vector", "map"):
+    for book in ENGINES:
         got = [replay.session_summary(s) for s in cpp[book][0]]
         same = got == want
         ok &= same
@@ -97,11 +98,13 @@ def main():
         if not same:
             print("    " + first_difference(want, got))
 
-    vec, mp = cpp["vector"][1], cpp["map"][1]
-    same = all(np.array_equal(vec[k], mp[k]) for k in vec)
-    ok &= same
-    print(f"[{'OK' if same else 'DIFF'}] status and top of book after each of {len(vec['status']):,} events, "
-          f"cpp vector == cpp map")
+    vec = cpp["vector"][1]
+    for book in ENGINES[1:]:
+        other = cpp[book][1]
+        same = all(np.array_equal(vec[k], other[k]) for k in vec)
+        ok &= same
+        print(f"[{'OK' if same else 'DIFF'}] status and top of book after each of {len(vec['status']):,} events, "
+              f"cpp vector == cpp {book}")
 
     bad = []
     for i, (bb, bq, ba, aq) in samples.items():

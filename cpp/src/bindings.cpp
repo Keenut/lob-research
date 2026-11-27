@@ -1,16 +1,18 @@
 // bindings.cpp: the Python module 'lobcpp', exposing book.hpp and replay.hpp with pybind11.
 //
 //     import lobcpp
-//     b = lobcpp.VecBook()            # or lobcpp.MapBook()
+//     b = lobcpp.VecBook()            # or MapBook, LadderBook (price ladder, window of 2^16 ticks)
 //     b.load_snapshot(last_update_id, bid_prices, bid_qtys, ask_prices, ask_qtys)
 //     b.apply(sides, prices, qtys, last_id)   # one depth event; numpy arrays or lists of ints
 //     b.best(0), b.top(0, 10), b.size(1), b.crossed(), b.last_update_id
 //
-//     r = lobcpp.VecReplayer(top_n)   # or lobcpp.MapReplayer: the replay.py state machine
+//     r = lobcpp.VecReplayer(top_n)   # or MapReplayer, LadderReplayer: the replay.py state machine
 //     r.set_snapshots(rx, session, last_id, offsets, side, price, qty)      # all snapshots, once
 //     out = r.process(rx, session, first_id, last_id, offsets, side, price, qty)  # e.g. one hour
 //     r.finish(); r.sessions()        # per-session results as dicts
 //     (bookdata.py builds these arrays from the Parquet tables.)
+//
+// Price ladders exist for several window sizes 2^N: LadderNBook / LadderNReplayer (see the module init).
 //
 // Prices are integer ticks and quantities integer lots (see book.hpp). Arrays are passed without
 // copying when they already are C-contiguous int8 / int64 numpy arrays; anything else (a list,
@@ -27,6 +29,7 @@
 #include <string>
 #include <optional>
 #include <stdexcept>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -51,10 +54,11 @@ static std::vector<lob::Level> to_levels(const I64& price, const I64& qty) {
     return out;
 }
 
+// Returns the class object, so that a caller can add methods (e.g. ladder_stats for the ladders).
 template <class Book>
-static void bind_book(py::module_& m, const char* name) {
-    py::class_<Book>(m, name)
-        .def(py::init<>())
+static py::class_<Book> bind_book(py::module_& m, const char* name) {
+    py::class_<Book> c(m, name);
+    c.def(py::init<>())
         .def("set", [](Book& b, int side, lob::Price p, lob::Qty q) { return b.set(to_side(side), p, q); },
              "Set one level (qty 0 removes it); False if a missing level was to be removed.")
         .def(
@@ -97,6 +101,7 @@ static void bind_book(py::module_& m, const char* name) {
         .def("crossed", &Book::crossed)
         .def("clear", &Book::clear)
         .def_readwrite("last_update_id", &Book::last_update_id);
+    return c;
 }
 
 // Arrays in "CSR" layout: item i owns the levels [offsets[i], offsets[i + 1]) of side / price / qty.
@@ -158,10 +163,10 @@ static py::dict session_to_dict(const lob::SessionResult& s) {
 }
 
 template <class Book>
-static void bind_replayer(py::module_& m, const char* name) {
+static py::class_<lob::Replayer<Book>> bind_replayer(py::module_& m, const char* name) {
     using R = lob::Replayer<Book>;
-    py::class_<R>(m, name)
-        .def(py::init<std::size_t, bool>(), py::arg("top_n") = 100, py::arg("profile") = false,
+    py::class_<R> c(m, name);
+    c.def(py::init<std::size_t, bool>(), py::arg("top_n") = 100, py::arg("profile") = false,
              "profile=True records where each level update lands (slower; for bench.py)")
         .def(
             "set_snapshots",
@@ -230,6 +235,29 @@ static void bind_replayer(py::module_& m, const char* name) {
                 return out;
             },
             "Finished sessions as dicts (same fields as replay.SessionReplay; prices in ticks, qty in lots).");
+    return c;
+}
+
+// Counters of a price ladder book, both sides added up (see LadderSide in book.hpp).
+template <class Book>
+static py::dict ladder_stats(const Book& b) {
+    py::dict d;
+    d["slots"] = decltype(b.bids)::kSlots;                         // window size in ticks
+    d["shifts_up"] = b.bids.shifts_up() + b.asks.shifts_up();       // window moves towards better prices
+    d["shifts_down"] = b.bids.shifts_down() + b.asks.shifts_down();
+    d["deep_sets"] = b.bids.deep_sets() + b.asks.deep_sets();       // level updates handled by the std::map
+    return d;
+}
+
+// The book (if book_name is not null) and the replay engine with a price ladder of 2^N slots.
+template <int N>
+static void bind_ladder(py::module_& m, const char* book_name, const char* replayer_name) {
+    using Book = lob::LadderBookOf<N>;
+    if (book_name)
+        bind_book<Book>(m, book_name).def("ladder_stats", &ladder_stats<Book>, "Window size and counters.");
+    bind_replayer<Book>(m, replayer_name)
+        .def("ladder_stats", [](const lob::Replayer<Book>& r) { return ladder_stats(r.book()); },
+             "Window size and counters, summed over the whole replay.");
 }
 
 PYBIND11_MODULE(lobcpp, m) {
@@ -238,6 +266,19 @@ PYBIND11_MODULE(lobcpp, m) {
     bind_book<lob::MapBook>(m, "MapBook");
     bind_replayer<lob::VecBook>(m, "VecReplayer");
     bind_replayer<lob::MapBook>(m, "MapReplayer");
+
+    // Price ladders by window size, 2^N slots (ticks). N = 16 is the size chosen for BTCUSDT and is also
+    // exported as LadderBook / LadderReplayer; N = 3 (8 slots) makes the window move all the time, for the
+    // tests; N = 12, 14, 18 are for the window-size comparison in bench.py.
+    bind_ladder<3>(m, "Ladder3Book", "Ladder3Replayer");
+    bind_ladder<12>(m, nullptr, "Ladder12Replayer");
+    bind_ladder<14>(m, nullptr, "Ladder14Replayer");
+    bind_ladder<16>(m, "Ladder16Book", "Ladder16Replayer");
+    bind_ladder<18>(m, nullptr, "Ladder18Replayer");
+    m.attr("LadderBook") = m.attr("Ladder16Book");
+    m.attr("LadderReplayer") = m.attr("Ladder16Replayer");
+    m.attr("ladder_log2_slots") = 16;  // must match lob::LadderBook
+    static_assert(std::is_same_v<lob::LadderBook, lob::LadderBookOf<16>>, "update ladder_log2_slots");
 
     // Smallest step of steady_clock seen in practice (it bounds the precision of per-event timings).
     m.def("clock_resolution_ns", []() {

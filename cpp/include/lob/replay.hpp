@@ -1,5 +1,6 @@
 // replay.hpp: the replay state machine of replay.py in C++ (header-only), for either book container.
 //
+// Book is VecBook, MapBook or a LadderBookOf<N> (book.hpp).
 // Same rules as replay.py, per session (one WebSocket connection; every session starts without a book):
 //   * snapshots are placed by their update id L, not by their receive time;
 //   * sync: the first event with u > L must satisfy U <= L + 1, else the snapshot is unusable;
@@ -169,6 +170,7 @@ public:
 
     const std::vector<SessionResult>& sessions() const { return results_; }
     const Profile& profile() const { return profile_; }
+    const Book& book() const { return book_; }  // read-only, e.g. for the counters of a price ladder
 
 private:
     struct Snapshot {
