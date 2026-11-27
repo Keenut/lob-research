@@ -87,3 +87,15 @@ def test_check_continuity_reads_compressed_hours(tmp_path, capsys):
     compress_raw.compress_one(src)
     check_continuity.check([tmp_path / "2026-01-01T00.log.gz"])
     assert capsys.readouterr().out == plain and "gaps=0" in plain
+
+
+def test_check_continuity_skips_a_truncated_snapshot_line(tmp_path, capsys):
+    """A recorder killed while writing a snapshot leaves a cut JSON line at the end of the file."""
+    src = make_hour(tmp_path, "2026-01-01T00")
+    last_rx = int(src.read_text(encoding="utf-8").splitlines()[-1].split(" ", 1)[0])
+    with open(src, "a", encoding="utf-8") as f:   # a new session, killed while writing its first snapshot
+        f.write(f"{last_rx + 1} 4 open wss://stream.binance.com\n")
+        f.write(f'{last_rx + 2} 4 snap {{"lastUpdateId": 99, "bids": [["100.00", "0.5')   # no newline
+    check_continuity.check([src])
+    out = capsys.readouterr().out
+    assert "session 3:" in out and "gaps=0" in out and "session 4:" in out and "events=0 synced=False" in out

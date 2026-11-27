@@ -24,7 +24,8 @@ and come from the reports in [`docs/`](docs/). All times are UTC.
 ```
 Binance spot, BTCUSDT
   WebSocket: depth@100ms diffs + trades (one combined stream)
-  REST: /api/v3/depth?limit=5000 at connect and every 10 min, /api/v3/time every 60 s
+  REST: /api/v3/depth?limit=5000 at connect and every 10 min (a failed request is retried after
+        5 s, doubling up to 60 s), /api/v3/time every 60 s
         |
    recorder.py                         appends what it receives, never builds a book
         |
@@ -432,7 +433,7 @@ order and output the top of book after every event. The ladder keeps that order 
 
 | Path | Role |
 |---|---|
-| `recorder.py` | asyncio recorder: WebSocket depth + trades, REST snapshots, clock samples, reconnection with backoff |
+| `recorder.py` | asyncio recorder: WebSocket depth + trades, REST snapshots (a failed one is retried within seconds, rate limits respected), clock samples, reconnection with backoff |
 | `check_continuity.py` | sequence continuity per session, holes between sessions, logged errors, raw latency (reads raw logs) |
 | `etl.py` | raw logs → Parquet tables, one file per table per UTC hour |
 | `compress_raw.py` | gzip finished raw hours, verified, to save disk space |
@@ -448,7 +449,7 @@ order and output the top of book after every event. The ladder keeps that order 
 | `bookdata.py` | Parquet → integer NumPy arrays for the C++ engine |
 | `crosscheck.py` | runs the Python reference and the C++ engines (vector, map, price ladder 2^16 and 2^18) on the same data and checks that they agree |
 | `bench.py` | speed of the engines on in-memory data; per-event times split by sync, snapshot check and window move; profile of where the updates land, in levels and in ticks |
-| `tests/` | pytest: book operations and comparison; sync, gap/resync, stale events, validation and mismatch classification; end-to-end raw log → ETL → Parquet → replay on a synthetic market with a known true book; clock offset recovery, path-asymmetry bias, drift, interpolation; C++ books and replay against the Python reference on scenarios, random multi-session streams and Parquet |
+| `tests/` | pytest: the recorder's snapshot retry policy (fake HTTP session); book operations and comparison; sync, gap/resync, stale events, validation and mismatch classification; end-to-end raw log → ETL → Parquet → replay on a synthetic market with a known true book; clock offset recovery, path-asymmetry bias, drift, interpolation; C++ books and replay against the Python reference on scenarios, random multi-session streams and Parquet |
 | `docs/` | the reports quoted above |
 | `data/` | raw logs and Parquet (git-ignored) |
 

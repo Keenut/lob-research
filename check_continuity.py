@@ -114,7 +114,10 @@ def check(paths):
             s.errors[payload[:140]] += 1
         elif kind == "snap":
             if not s.synced:
-                s.snap_id = json.loads(payload)["lastUpdateId"]
+                try:
+                    s.snap_id = json.loads(payload)["lastUpdateId"]
+                except json.JSONDecodeError:
+                    continue  # truncated last line (recorder killed, or the file is still being written)
                 try_sync(s)
         elif kind == "ws":
             try:

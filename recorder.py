@@ -31,6 +31,8 @@ WS_URL = "wss://stream.binance.com:9443/stream?streams={s}@depth@100ms/{s}@trade
 REST_URL = "https://api.binance.com/api/v3/depth"
 TIME_URL = "https://api.binance.com/api/v3/time"
 SNAPSHOT_LIMIT = 5000  # max levels per side the REST endpoint returns
+SNAPSHOT_RETRY_FIRST = 5.0   # seconds before retrying a failed snapshot request; doubles after each failure
+SNAPSHOT_RETRY_MAX = 60.0    # ... up to this
 
 
 class RotatingLog:
@@ -61,21 +63,45 @@ class RotatingLog:
             self.f = None
 
 
+def retry_after(headers, default):
+    """Seconds asked for by a Retry-After header (Binance sends one with 429 and 418), else `default`."""
+    try:
+        return max(float(headers.get("Retry-After", "")), 1.0)
+    except ValueError:
+        return default
+
+
 async def snapshot_loop(http, log, symbol, session, interval):
-    """Fetch a REST depth snapshot now, then every `interval` seconds."""
+    """Fetch a REST depth snapshot now, then every `interval` seconds.
+
+    A failed request is retried sooner: after 5 s, then 10, 20, 40 and at most 60 s, until one succeeds.
+    A session cannot build a book before its first snapshot, so waiting the full interval after a
+    timeout at connect would cost up to 10 minutes of data. The exceptions are HTTP 429 (request rate
+    limit exceeded), 418 (IP banned for not backing off after 429s) and 403 (blocked by Binance's web
+    application firewall): then wait as long as the Retry-After header asks, or the full interval if it
+    is missing, because Binance extends the bans of clients that keep sending."""
+    retry = SNAPSHOT_RETRY_FIRST
     while True:
+        wait = None   # set when the request succeeded or was rate-limited
         try:
             params = {"symbol": symbol, "limit": SNAPSHOT_LIMIT}
             async with http.get(REST_URL, params=params) as r:
                 body = await r.text()
                 if r.status == 200:
                     log.write(session, "snap", body)
+                    wait = interval
+                    retry = SNAPSHOT_RETRY_FIRST
                 else:
                     log.write(session, "err", f"snapshot http {r.status} {body[:200]}")
+                    if r.status in (403, 418, 429):
+                        wait = retry_after(r.headers, interval)
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
             log.write(session, "err", f"snapshot {e!r}")
         log.flush()
-        await asyncio.sleep(interval)
+        if wait is None:   # network error, timeout or another HTTP error: retry sooner
+            wait = retry
+            retry = min(retry * 2, SNAPSHOT_RETRY_MAX)
+        await asyncio.sleep(wait)
 
 
 async def clock_loop(http, log, session, interval):
