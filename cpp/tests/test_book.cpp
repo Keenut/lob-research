@@ -1,7 +1,7 @@
 // test_book.cpp: C++ unit tests for book.hpp, without an external test framework.
 //
 // Every test runs on every container (VecBook, MapBook, and the price ladder with its real window of
-// 2^16 slots and with tiny windows of 4 or 8 slots, where the window moves at almost every update).
+// 2^18 slots and with tiny windows of 4 or 8 slots, where the window moves at almost every update).
 // The randomized tests compare them with a deliberately naive implementation (unsorted vector, linear
 // search, sort on every query), so a bug shared by the real containers is unlikely to go unnoticed.
 // The ladder also gets its own tests: a random walk with large jumps that moves the window often in

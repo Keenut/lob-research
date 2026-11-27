@@ -192,7 +192,7 @@ public:
     static constexpr std::int64_t kBestSlot = kSlots - kSlots / 4 - 1;  // where a move puts the best level
     static constexpr std::int64_t kLowSlot = kSlots / 2;               // best below this: move the window down
 
-    LadderSide() : qty_(static_cast<std::size_t>(kSlots), 0) {}  // on the heap: 512 KiB for 2^16 slots
+    LadderSide() : qty_(static_cast<std::size_t>(kSlots), 0) {}  // on the heap: 2 MiB for 2^18 slots
 
     bool set(Price p, Qty q) {
         const Price k = key_of(p);
@@ -443,8 +443,14 @@ using VecBook = BasicBook<VecSide>;
 using MapBook = BasicBook<MapSide>;
 template <int kLog2Slots>
 using LadderBookOf = BasicBook<Ladder<kLog2Slots>::template Side>;
-// 2^16 ticks = 655.36 USDT: the smallest window past the knee of the measured distance distribution
-// (bench.py section 5); bench.py also measures 2^12, 2^14 and 2^18.
-using LadderBook = LadderBookOf<16>;
+// The default window: 2^18 ticks = 2,621.44 USDT, chosen by measurement on 24 h of BTCUSDT (bench.py).
+// 2^16 is already past the knee of the distance distribution (section 5), but the window also sets the
+// cost of a session sync: after a sync it reaches 3/4 of its size behind the best price, 491.5 USDT for
+// 2^16 and 1,966 USDT for 2^18, while a 5000-level REST snapshot spans about 2,900 to 3,400 USDT from
+// its deepest bid to its deepest ask. Every snapshot level below the window is a std::map insert, which
+// makes the session sync the costliest kind of event with 2^16 (section 3). 2^18 also moves the window
+// 19 times in 24 h instead of 361 (section 1), each move costing more. The price: 2 MiB per side, not
+// 512 KiB. bench.py also measures 2^12, 2^14 and 2^16.
+using LadderBook = LadderBookOf<18>;
 
 }  // namespace lob

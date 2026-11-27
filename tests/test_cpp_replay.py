@@ -174,7 +174,7 @@ def test_small_ladder_uses_its_map_and_moves():
     """The differential tests above are strong for the ladder only if its std::map is used and its window
     moves. With 8 slots on the synthetic market (50 ticks per side) most updates go to the map and the
     window moves a few times per stream (cpp/tests/test_book.cpp moves it thousands of times, with the
-    invariants checked). With 2^16 slots everything stays in the window."""
+    invariants checked). With the default window (2^18 slots) everything stays in the window."""
     mev, msn, _ = synthetic_market(3, n_updates=3000)
     events, snaps = objects_from_market(mev, msn, session=5, rx0=10**12)
     assert_same(events, snaps)
@@ -182,7 +182,7 @@ def test_small_ladder_uses_its_map_and_moves():
     updates = sum(len(e.bid_px) + len(e.ask_px) for e in events)
     assert st["slots"] == 8 and st["shifts_up"] > 0 and st["shifts_down"] > 0 and st["deep_sets"] > updates // 2
     st = run_engine(events, snaps, 100, "ladder")[0].ladder_stats()
-    assert st == dict(slots=2**16, shifts_up=0, shifts_down=0, deep_sets=0)
+    assert st == dict(slots=2**18, shifts_up=0, shifts_down=0, deep_sets=0)
 
 
 # ---------------------------------------------------------------- end to end through Parquet

@@ -272,8 +272,8 @@ class CppSession:
 
 
 # C++ replay engines (classes of the lobcpp module) by book container. "ladder" is the price ladder with
-# the window chosen for BTCUSDT (2^16 ticks); "ladderN" has a window of 2^N ticks (N = 3: for the tests,
-# the window moves all the time; N = 12 .. 18: for the window-size comparison in bench.py).
+# the window chosen for BTCUSDT (2^18 ticks, see book.hpp); "ladderN" has a window of 2^N ticks (N = 3: for
+# the tests, the window moves all the time; N = 12 .. 18: for the window-size comparison in bench.py).
 CPP_REPLAYERS = {"vector": "VecReplayer", "map": "MapReplayer", "ladder": "LadderReplayer",
                  "ladder3": "Ladder3Replayer", "ladder12": "Ladder12Replayer", "ladder14": "Ladder14Replayer",
                  "ladder16": "Ladder16Replayer", "ladder18": "Ladder18Replayer"}

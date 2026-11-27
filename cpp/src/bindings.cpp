@@ -1,7 +1,7 @@
 // bindings.cpp: the Python module 'lobcpp', exposing book.hpp and replay.hpp with pybind11.
 //
 //     import lobcpp
-//     b = lobcpp.VecBook()            # or MapBook, LadderBook (price ladder, window of 2^16 ticks)
+//     b = lobcpp.VecBook()            # or MapBook, LadderBook (price ladder, window of 2^18 ticks)
 //     b.load_snapshot(last_update_id, bid_prices, bid_qtys, ask_prices, ask_qtys)
 //     b.apply(sides, prices, qtys, last_id)   # one depth event; numpy arrays or lists of ints
 //     b.best(0), b.top(0, 10), b.size(1), b.crossed(), b.last_update_id
@@ -267,18 +267,18 @@ PYBIND11_MODULE(lobcpp, m) {
     bind_replayer<lob::VecBook>(m, "VecReplayer");
     bind_replayer<lob::MapBook>(m, "MapReplayer");
 
-    // Price ladders by window size, 2^N slots (ticks). N = 16 is the size chosen for BTCUSDT and is also
-    // exported as LadderBook / LadderReplayer; N = 3 (8 slots) makes the window move all the time, for the
-    // tests; N = 12, 14, 18 are for the window-size comparison in bench.py.
+    // Price ladders by window size, 2^N slots (ticks). N = 18 is the size chosen for BTCUSDT (see book.hpp)
+    // and is also exported as LadderBook / LadderReplayer; N = 3 (8 slots) makes the window move all the
+    // time, for the tests; N = 12, 14, 16 are for the window-size comparison in bench.py.
     bind_ladder<3>(m, "Ladder3Book", "Ladder3Replayer");
     bind_ladder<12>(m, nullptr, "Ladder12Replayer");
     bind_ladder<14>(m, nullptr, "Ladder14Replayer");
-    bind_ladder<16>(m, "Ladder16Book", "Ladder16Replayer");
-    bind_ladder<18>(m, nullptr, "Ladder18Replayer");
-    m.attr("LadderBook") = m.attr("Ladder16Book");
-    m.attr("LadderReplayer") = m.attr("Ladder16Replayer");
-    m.attr("ladder_log2_slots") = 16;  // must match lob::LadderBook
-    static_assert(std::is_same_v<lob::LadderBook, lob::LadderBookOf<16>>, "update ladder_log2_slots");
+    bind_ladder<16>(m, nullptr, "Ladder16Replayer");
+    bind_ladder<18>(m, "Ladder18Book", "Ladder18Replayer");
+    m.attr("LadderBook") = m.attr("Ladder18Book");
+    m.attr("LadderReplayer") = m.attr("Ladder18Replayer");
+    m.attr("ladder_log2_slots") = 18;  // must match lob::LadderBook
+    static_assert(std::is_same_v<lob::LadderBook, lob::LadderBookOf<18>>, "update ladder_log2_slots");
 
     // Smallest step of steady_clock seen in practice (it bounds the precision of per-event timings).
     m.def("clock_resolution_ns", []() {
