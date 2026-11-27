@@ -15,7 +15,7 @@ and come from the reports in [`docs/`](docs/). All times are UTC.
 | Recorder, continuity checker, ETL to Parquet, DuckDB queries | done |
 | Python reference L2 book, validated against REST snapshots | done |
 | Clock offset to the exchange, corrected latency | done |
-| C++17 L2 book and replay engine (pybind11), differential tests against the Python reference, benchmark | done |
+| C++17 L2 book and replay engine (pybind11): sorted vector, `std::map` and a price ladder designed from a profile of the update stream; differential tests against the Python reference; benchmark | done |
 | Microstructure research (spread, depth imbalance, order flow imbalance, microprice, short-horizon prediction) | planned |
 | Simulator (Avellaneda–Stoikov quoting, signal-based taking, fees, latency and queue models, P&L attribution) | planned |
 
@@ -71,9 +71,9 @@ $pb = (python -c "import pybind11; print(pybind11.get_cmake_dir())") -replace '\
 cmake -S cpp -B build -G "Visual Studio 17 2022" -A x64 -DPython_EXECUTABLE="$py" -Dpybind11_DIR="$pb"
 cmake --build build --config Release
 .\build\Release\lob_tests.exe                        # C++ unit tests
-python replay.py --engine cpp                        # same report as replay.py, C++ engine
+python replay.py --engine cpp-ladder                 # same report as replay.py, C++ engine (price ladder)
 python crosscheck.py                                 # Python and C++ engines must agree exactly
-python bench.py                                      # speed, data already in memory
+python bench.py                                      # speed (data already in memory) and update profile
 ```
 
 ## Data format
@@ -131,8 +131,8 @@ Per session (one WebSocket connection; every session starts without a book), fol
 ## C++ engine (`cpp/`, Python module `lobcpp`)
 
 - `book.hpp`: the same L2 book semantics as `book.py`, with prices as integer ticks (0.01 USDT) and
-  quantities as integer lots (1e-8 BTC). Each side keeps its levels ordered from worst to best, in
-  one of two interchangeable containers: a sorted `std::vector` or a `std::map`.
+  quantities as integer lots (1e-8 BTC). Each side is one of three interchangeable containers with the
+  same interface: a sorted `std::vector`, a `std::map`, or a price ladder (below, the default).
 - `replay.hpp`: the state machine of `replay.py` (sync, gaps, stale events, snapshot checks,
   untracked / unexplained mismatches), generic over the book container, processing one hour per call
   and giving the top of book after every event.
@@ -142,6 +142,74 @@ Per session (one WebSocket connection; every session starts without a book), fol
 - `bookdata.py`: Parquet → integer arrays. A price that is not a whole number of ticks raises an error
   instead of being rounded. The conversion is exact both ways: `ticks / 100` is the same double as the
   exchange's decimal string, so the two engines' results can be compared with `==`.
+
+### Price ladder (`LadderSide` in `book.hpp`)
+
+Designed from a profile of the real update stream (`bench.py` sections 4–6 in
+[`benchmark.txt`](docs/benchmark.txt)), not assumed:
+
+- 70.5 % of the applied level updates insert or erase a price level, with on average 275 better levels
+  above it: expensive for a sorted vector (see "Why the vector loses" below).
+- Counted in ticks from the best price of the same side, just before each update: 63.78 % of the
+  updates land within 20.47 USDT of it, 89.05 % within 163.83 USDT, 94.66 % within 655.35 USDT. 0.77 %
+  set a new best price, all within 163.83 USDT of the old one. A far cluster of 2.95 % lands 5,243 to
+  20,972 USDT behind the best price.
+- When an update erases the best level, the next level is 1 tick away in 27.17 % of the cases and
+  within 255 ticks in 99.29 %.
+
+The design that follows from this:
+
+- **Array window.** Each side has an array of W = 2^N quantities, one slot per tick, over a window of
+  prices around the best price: slot *i* holds the level whose key is `base + i` (quantity 0: no
+  level). An update inside the window is one array access: no search, no allocation, no shifting.
+- **Keys.** Bid key = price, ask key = −price: on both sides a larger key is a better price, so one
+  implementation serves both.
+- **Deep levels.** Levels below the window, the far cluster among them, live in a `std::map`.
+- **Best level.** The highest occupied slot. When it is erased, the array is scanned downwards: the
+  next level is close, so a bitmap of the occupied slots is not needed.
+- **Window moves.** When an insert lands above the window, or erases leave the best level below the
+  middle of the window, the window moves so that the best level lands on slot 3W/4 − 1. A move costs
+  O(W) and is rare: the best price has to move by about W/4 first.
+- **Invariants**, checked by `valid()` after the updates in the tests: levels at or above `base` are in
+  the array, deeper ones in the map, none above the window; the level count and the highest occupied
+  slot are exact; a side that is not empty has its best level in the upper half of the window. So the
+  window always covers at least W/2 ticks behind the best price.
+
+**Window size.** The last invariant turns the distance profile into an upper bound on the share of the
+updates that can reach the `std::map`: those more than W/2 ticks behind the best price. The measured
+share stays under it for every window (`bench.py` section 1):
+
+| Window | Width | Array per side | Updates via the `std::map`: bound / measured | Window moves in 24 h |
+|---|---|---|---|---|
+| 2^12 ticks | 40.96 USDT | 32 KiB | ≤ 35.5 % / 28.32 % | 36,281 |
+| 2^14 ticks | 163.84 USDT | 128 KiB | ≤ 15.7 % / 12.68 % | 4,517 |
+| 2^16 ticks | 655.36 USDT | 512 KiB | ≤ 5.8 % / 4.83 % | 361 |
+| **2^18 ticks (default)** | 2,621.44 USDT | 2 MiB | ≤ 3.5 % / 3.37 % | 19 |
+
+2^16 is already past the knee of the distribution and was the first choice. The per-event timings
+(below) changed it to 2^18. After a sync the window reaches 3W/4 behind the best price: 491.5 USDT for
+2^16 but 1,966 USDT for 2^18, while the sync snapshots spanned 2,910–3,410 USDT from the deepest bid to
+the deepest ask. With 2^16 every deeper level of the snapshot is a `std::map` insert, and the session
+sync is the costliest kind of event: median 377.2 µs, against 185.3 µs with 2^18. 2^18 also moves the
+window 19 times in 24 h instead of 361. The price is memory: 2 MiB per side instead of 512 KiB. Of its
+remaining 3.37 % of updates via the map, 2.95 points are the far cluster, which no reasonable window
+covers.
+
+**Testing.**
+
+- `lob_tests` (C++) runs every container against a deliberately naive book (unsorted vector, linear
+  search) on 200,000 random updates per seed, the ladder also with windows of 4 and 8 slots, where the
+  window moves at almost every update and the map is used all the time. A random walk with price jumps
+  of up to 3/4 of a window moves the ladder's window thousands of times in both directions, with the
+  invariants checked after every update (every 64th update for windows above 1024 slots), plus
+  hand-computed edge cases on 8 slots.
+- pytest compares the C++ books and replay engines, an 8-slot ladder among them, with the Python
+  reference after every event, on random multi-session streams and through Parquet.
+- Mutation testing by hand, in a Linux build: bugs deliberately injected into the ladder (off-by-ones
+  in the window bounds and in the moves, missing count updates, a wrong scan bound, ask keys not
+  negated, an empty side not re-anchored) were all caught by `lob_tests`. AddressSanitizer and
+  UndefinedBehaviorSanitizer runs of `lob_tests` and of pytest were clean.
+- On real data: the same results as the Python reference with both windows (next section).
 
 ## Clock and latency (`clock.py`)
 
@@ -266,27 +334,55 @@ Corrected one-way latency, last session (21:46–22:59, 100 % covered by clock s
 
 ### Agreement with the Python reference ([`crosscheck_top1000.txt`](docs/crosscheck_top1000.txt))
 
-On the 24 hours (853,159 events), the Python reference, the C++ engine with the vector book and the
-C++ engine with the map book give identical results: every session result and all 139 snapshot checks
-with their complete mismatch lists, at 100 and at 1000 levels per side (at 1000: 278,000 levels
+On the 24 hours (853,159 events), the Python reference and four C++ engines (vector book, map book, and
+the price ladder with windows of 2^16 and 2^18 ticks) give identical results: every session result and
+all 139 snapshot checks with their complete mismatch lists, at 1000 levels per side (278,000 levels
 compared, 344 mismatches, all untracked). The status and the top of book (best bid and ask with their
-quantities) after each of the 853,159 events are identical between the two C++ books, and equal to the
+quantities) after each of the 853,159 events are identical across the C++ engines, and equal to the
 Python reference at the 8,531 applied events sampled for it.
 
 ### Speed ([`benchmark.txt`](docs/benchmark.txt))
 
-Intel Core Ultra 5 125H laptop, Windows 11, MSVC 19.44 release build, Python 3.14; the recorder was
-running in the background. Data already in memory (Parquet reading not timed); median of 3 runs after
-a warm-up run.
+Intel Core Ultra 5 125H laptop, Windows 11, MSVC 19.44 release build, Python 3.14; plugged in, Windows
+power mode "Best performance", the recorder running in the background. Data already in memory (Parquet
+reading not timed); median of 3 runs after a warm-up run. The per-event times come from a separate run
+with a clock around each event (resolution 100 ns).
 
 All 24 hours (853,159 events, 44,064,700 level updates):
 
-| Engine | Time | Events/s | Level updates/s | ns per update | Per event p50 / p99 / p99.9 |
-|---|---|---|---|---|---|
-| C++, `std::map` book | 4.53 s | 188,307 | 9.73 M | 102.8 | 2.6 / 38.8 / 70.2 µs |
-| C++, sorted `std::vector` book | 13.91 s | 61,318 | 3.17 M | 315.8 | 4.8 / 130.5 / 272.3 µs |
+| Engine | Time | Level updates/s | ns per update | Per event p50 / p99 / p99.9 |
+|---|---|---|---|---|
+| C++, sorted `std::vector` book | 13.834 s | 3.19 M | 313.9 | 4.70 / 131.40 / 275.70 µs |
+| C++, `std::map` book | 4.551 s | 9.68 M | 103.3 | 2.50 / 38.40 / 69.90 µs |
+| C++, price ladder, 2^12 ticks | 1.924 s | 22.90 M | 43.7 | 0.90 / 20.60 / 44.60 µs |
+| C++, price ladder, 2^14 ticks | 1.056 s | 41.73 M | 24.0 | 0.60 / 10.20 / 25.80 µs |
+| C++, price ladder, 2^16 ticks | 0.638 s | 69.08 M | 14.5 | 0.40 / 4.50 / 11.70 µs |
+| **C++, price ladder, 2^18 ticks (default)** | 0.560 s | 78.69 M | 12.7 | 0.30 / 4.10 / 9.00 µs |
 
-(Per-event times: a separate run with a clock around each event; clock resolution 100 ns.)
+The default ladder is 8.1× faster than the map book and 24.7× faster than the vector book, with a
+per-event p99 of 4.10 µs instead of 38.40 and 131.40 µs.
+
+**Where the slowest events come from** (`bench.py` section 3). Each timed event is counted in the first
+of these classes that applies: a session sync (the book loaded from a REST snapshot), a snapshot check
+(100 levels per side), an event in which a ladder window moved, or none of these. Times in µs:
+
+| Engine | Sync, 7 events: median / max | Check, 139 events: median | Window moved: events, median / max | Other events: p99.9 / max |
+|---|---|---|---|---|
+| C++, sorted `std::vector` book | 125.9 / 213.9 | 9.6 | – | 275.70 / 2771.2 |
+| C++, `std::map` book | 629.6 / 952.5 | 10.1 | – | 69.80 / 323.0 |
+| C++, price ladder, 2^16 ticks | 377.2 / 533.5 | 6.4 | 347, 40.6 / 158.8 | 9.70 / 298.6 |
+| C++, price ladder, 2^18 ticks | 185.3 / 226.8 | 6.7 | 13, 202.6 / 323.7 | 8.80 / 137.6 |
+
+- The session sync, once per connection, loads 5000 levels per side from the snapshot. The map book
+  pays a tree insert for every level; the 2^16 ladder for every level more than 491.5 USDT behind the
+  best price, while the 2^18 ladder puts most of the snapshot in its array.
+- A window move costs O(W): a 2^18 move costs more than a 2^16 move, but happens in 13 events instead
+  of 347.
+- The maxima of the other events, 138–329 µs for the map and the ladders, fall on ordinary events at
+  different times in each engine, one of them with only 18 level updates: most likely the operating
+  system interrupting the thread, not the data structure. The vector is the exception: its slowest
+  event, 400 level updates at 2026-11-25 13:46:04, was its slowest in each of the three runs of this
+  benchmark, so its 2,771 µs is a real cost of the vector's shifts, not noise.
 
 **Why the vector loses.** "A sorted vector beats a tree" holds when changes happen near the end of the
 vector. Profiling the 44,064,232 applied level updates shows that here they do not: 35.3 % insert a
@@ -296,10 +392,11 @@ the book), and an insert or erase has on average 275 better levels above it (46.
 many 16-byte elements, about 4.3 KiB, in a book of about 7,100 bid and 6,300 ask levels. The tree pays
 a few pointer hops instead.
 
-**Against the Python reference** (first 2 hours, 63,392 events): Python 0.257 s, C++ map 0.198 s
-(1.3× faster), C++ vector 0.682 s. This is not a like-for-like language comparison: the Python
-reference keeps each side in an unordered dict (O(1) per update) and never computes the top of book
-per event, while the C++ engines keep the levels sorted and output the top of book after every event.
+**Against the Python reference** (first 2 hours, 63,392 events): Python 0.265 s, C++ map 0.198 s (1.3×
+faster), C++ vector 0.677 s (0.4×), C++ price ladder 2^18 0.026 s (10.3× faster). This is not a
+like-for-like language comparison: the Python reference keeps each side in an unordered dict (O(1) per
+update) and never computes the top of book per event, while the C++ engines keep the levels in price
+order and output the top of book after every event. The ladder keeps that order almost for free.
 
 ## Limitations
 
@@ -319,10 +416,17 @@ per event, while the C++ engines keep the levels sorted and output the top of bo
   the checker skip a truncated last line).
 - One symbol, one venue, one day: nothing here is yet a statistical result about markets.
 - Speed was measured on one laptop with the recorder running; per-event timings have the 100 ns
-  resolution of the Windows clock. A structure designed for this update pattern (for example a
-  tick-indexed price ladder) has not been tried yet.
-- `explore.py`, `replay.py` and `clock.py` read every converted hour: re-running them after converting
-  more hours changes the numbers. The reports in `docs/` were produced on the 24 hours above.
+  resolution of the Windows clock. The timings depend on the machine's state: in a power-saving state
+  every engine, the Python reference included, ran markedly slower, and the process was not pinned to a
+  core type on this CPU, which has performance and efficiency cores. The run above (plugged in, power
+  mode "Best performance") agrees within 1 % with the first benchmark (commit 897586a) for the vector
+  and map books.
+- Price ladder: a window move and a sync cost O(W) (the array is moved or cleared, 2 MiB per side);
+  the window size is a compile-time constant chosen for BTCUSDT's tick and price; deep levels stay in a
+  `std::map`; `probe()` (profiling only) and listing every level are O(W).
+- `explore.py` and `clock.py` read every converted hour: re-running them after converting more hours
+  changes the numbers (`replay.py`, `crosscheck.py` and `bench.py` take `--max-files 24`). The reports in
+  `docs/` were produced on the 24 hours above.
 
 ## Repository layout
 
@@ -336,14 +440,14 @@ per event, while the C++ engines keep the levels sorted and output the top of bo
 | `book.py` | reference L2 book (two dicts) and top-N comparison with a snapshot |
 | `replay.py` | per-session sync / gap / resync state machine, snapshot validation, mismatch classification |
 | `clock.py` | clock offset from the samples, drift, corrected latency with bounds |
-| `cpp/include/lob/book.hpp` | C++ L2 book: integer ticks and lots, vector or map sides |
+| `cpp/include/lob/book.hpp` | C++ L2 book: integer ticks and lots; sorted vector, `std::map` or price-ladder sides |
 | `cpp/include/lob/replay.hpp` | C++ version of the replay state machine, optional timing and depth profiling |
 | `cpp/src/bindings.cpp` | pybind11 module `lobcpp` |
-| `cpp/tests/test_book.cpp` | C++ unit tests, including a comparison with a deliberately naive book |
+| `cpp/tests/test_book.cpp` | C++ unit tests: every container against a deliberately naive book; the ladder's window moves and invariants, with tiny windows |
 | `cpp/CMakeLists.txt` | build of the tests and of the module |
 | `bookdata.py` | Parquet → integer NumPy arrays for the C++ engine |
-| `crosscheck.py` | runs the Python and both C++ engines on the same data and checks that they agree |
-| `bench.py` | speed of the engines on in-memory data, per-event times, update depth profile |
+| `crosscheck.py` | runs the Python reference and the C++ engines (vector, map, price ladder 2^16 and 2^18) on the same data and checks that they agree |
+| `bench.py` | speed of the engines on in-memory data; per-event times split by sync, snapshot check and window move; profile of where the updates land, in levels and in ticks |
 | `tests/` | pytest: book operations and comparison; sync, gap/resync, stale events, validation and mismatch classification; end-to-end raw log → ETL → Parquet → replay on a synthetic market with a known true book; clock offset recovery, path-asymmetry bias, drift, interpolation; C++ books and replay against the Python reference on scenarios, random multi-session streams and Parquet |
 | `docs/` | the reports quoted above |
 | `data/` | raw logs and Parquet (git-ignored) |
@@ -354,13 +458,13 @@ Reports in `docs/` and the commands that produced them:
 |---|---|
 | `continuity_report.txt` | `python check_continuity.py` on the 24 raw hour files |
 | `explore_report.txt` | `python explore.py` |
-| `replay_top100.txt` | `python replay.py` |
-| `replay_top1000.txt`, `validation_top1000.csv` | `python replay.py --top 1000 --csv docs\validation_top1000.csv` |
-| `replay_top5000.txt`, `validation_top5000.csv` | `python replay.py --top 5000 --csv docs\validation_top5000.csv` |
+| `replay_top100.txt` | `python replay.py --max-files 24` |
+| `replay_top1000.txt`, `validation_top1000.csv` | `python replay.py --max-files 24 --top 1000 --csv docs\validation_top1000.csv` |
+| `replay_top5000.txt`, `validation_top5000.csv` | `python replay.py --max-files 24 --top 5000 --csv docs\validation_top5000.csv` |
 | `clock_report.txt` | `python clock.py` |
 | `clock_report_slack40.txt` | `python clock.py --slack-ms 40` |
-| `crosscheck_top1000.txt` | `python crosscheck.py --top 1000` |
-| `benchmark.txt` | `python bench.py` |
+| `crosscheck_top1000.txt` | `python crosscheck.py --max-files 24 --top 1000` |
+| `benchmark.txt` | `python bench.py --max-files 24` (plugged in, power mode "Best performance") |
 | `windows_time_events.txt` | `Get-WinEvent` on the System log, Kernel-General event 1 (times in the `TimeCreated` lines are local, UTC+1; message language: Turkish) |
 
 ## References

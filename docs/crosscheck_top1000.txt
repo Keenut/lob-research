@@ -2,9 +2,13 @@
 
 [OK] session results, python == cpp vector
 [OK] session results, python == cpp map
+[OK] session results, python == cpp ladder16
+[OK] session results, python == cpp ladder18
 [OK] status and top of book after each of 853,159 events, cpp vector == cpp map
+[OK] status and top of book after each of 853,159 events, cpp vector == cpp ladder16
+[OK] status and top of book after each of 853,159 events, cpp vector == cpp ladder18
 [OK] top of book python == cpp at 8,531 sampled applied events
 
 compared: 7 sessions, 853,159 events, 139 snapshot checks, 278,000 levels, 344 mismatched (0 unexplained)
-time incl. Parquet reading: python 16.8 s, cpp vector 16.6 s, cpp map 7.4 s
+time incl. Parquet reading: python 14.2 s, cpp vector 16.7 s, cpp map 7.0 s, cpp ladder16 3.1 s, cpp ladder18 2.8 s
 ALL ENGINES AGREE
