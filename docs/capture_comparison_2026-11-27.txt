@@ -1,0 +1,72 @@
+﻿compare_captures: A = huawei, B = msi, hours 2026-11-27T22 .. 2026-11-27T23
+  huawei: 2026-11-27T22.log.gz, 2026-11-27T23.log.gz; lines skipped 0, messages of other streams 0
+  msi: 2026-11-27T22.log.gz, 2026-11-27T23.log.gz; lines skipped 0, messages of other streams 0
+
+== sessions (receive time rx on each PC's own clock, UTC)
+huawei: 1 session(s) with depth data
+  session 1795811542: 2026-11-27 22:00:00Z -> 2026-11-27 23:59:59Z  depth 71,247  trades 155,611  update id gaps 0  trade id gaps 0
+  holes: none
+msi: 1 session(s) with depth data
+  session 1795819228: 2026-11-27 22:40:29Z -> 2026-11-27 23:59:59Z  depth 47,196  trades 88,519  update id gaps 0  trade id gaps 0
+  holes: none
+
+== common window (the ids that both captures span)
+update ids 103851758442 .. 103853346686 (1,588,245 ids), messages in both from E = 2026-11-27 22:40:29.614Z to 2026-11-27 23:59:59.814Z (79.5 min)
+trade ids 6922737640 .. 6922826158 (88,519 ids), messages in both from E = 2026-11-27 22:40:30.140Z to 2026-11-27 23:59:59.506Z (79.5 min)
+
+== depth events (key: first and last update id (U, u))
+                                                      huawei           msi
+received (distinct messages)                          71,247        47,196
+  = outside the common window                         24,051             0
+  + in the window, only in this capture                    0             0
+      other not connected                                  0             0
+      gap in the other                                     0             0
+      other boundaries                                     0             0
+  + in both                                           47,196        47,196
+received a second time (not counted above)                 0             0
+in both: raw payload identical byte for byte 46,994 (99.57 %), same fields in other bytes 0, different fields 202
+  fields that differ: E 202
+  E_huawei - E_msi where E differs (ms): min -1, p50 1, max 7
+    (103851765084, 103851765090): E: huawei 1795819256216, msi 1795819256215
+    (103851773256, 103851773268): E: huawei 1795819290615, msi 1795819290614
+    (103851775898, 103851775928): E: huawei 1795819297215, msi 1795819297214
+event pairs whose [U, u] intersect without being equal: 0
+
+== trades (key: trade id t)
+                                                      huawei           msi
+received (distinct messages)                         155,611        88,519
+  = outside the common window                         67,092             0
+  + in the window, only in this capture                    0             0
+      other not connected                                  0             0
+      gap in the other                                     0             0
+  + in both                                           88,519        88,519
+received a second time (not counted above)                 0             0
+in both: raw payload identical byte for byte 80,331 (90.75 %), same fields in other bytes 0, different fields 8,188
+  fields that differ: E 8,188
+  E_huawei - E_msi where E differs (ms): min -1, p50 1, max 4
+    6922737726: E: huawei 1795819232697, msi 1795819232696
+    6922737727: E: huawei 1795819232697, msi 1795819232696
+    6922737728: E: huawei 1795819232697, msi 1795819232696
+
+== latency (messages in both captures; clock correction as in clock.py: good samples rtt <= min + 20 ms, max 600 s to a good sample)
+clock samples: huawei: 119 samples, rtt min/p50 235/243 ms, 111 good, offset median 1557.2 ms, drift +74.9 ms/h, largest step between good samples 8.9 ms
+               msi: 80 samples, rtt min/p50 225/287 ms, 6 good, offset median -28.1 ms, drift -24.9 ms/h, largest step between good samples 8.8 ms
+
+depth events, 47,196 messages in both, rx - E (ms):
+                    raw p50  raw p99  corr p50  corr p99   corr p50 bounds  corrected
+  huawei              -1458    -1410       120       132         [-1, 242]     100.0%
+  msi                   142      165       112       134         [-2, 228]      88.4%
+  receive time huawei - msi of the same message: raw p50 -1600.1; corrected p1 -7.5, p10 -1.7, p50 7.4, p90 10.7, p99 16.8, p50 bounds [-229.3, 244.2]
+  huawei received it first in 14.8 % of the messages (corrected; rests on the symmetric-path assumption of both clocks)
+
+trades, 88,519 messages in both, rx - T (ms):
+                    raw p50  raw p99  corr p50  corr p99   corr p50 bounds  corrected
+  huawei              -1440    -1162       123       380          [2, 245]     100.0%
+  msi                   145      410       118       395          [3, 234]      91.8%
+  receive time huawei - msi of the same message: raw p50 -1586.3; corrected p1 -229.6, p10 -6.7, p50 5.2, p90 10.8, p99 241.6, p50 bounds [-231.5, 242.3]
+  huawei received it first in 25.6 % of the messages (corrected; rests on the symmetric-path assumption of both clocks)
+
+spike minutes: max - median of raw rx - E > 500 ms within a minute of exchange time (depth events in both, 80 minutes)
+  in both 0, only huawei 1, only msi 0, in neither 79
+       minute (E, UTC)  events    spike huawei       spike msi
+     2026-11-27 22:58Z     597             724             269

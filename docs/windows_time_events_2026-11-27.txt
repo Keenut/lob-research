@@ -1,0 +1,59 @@
+﻿Windows clock changes on both PCs around the two-capture overlap of 2026-11-27 22:40:29 to 2026-11-28 00:01 UTC
+(docs/capture_comparison_2026-11-27.txt): System log, Microsoft-Windows-Kernel-General, event 1, 8 hours back.
+Command: Get-WinEvent -FilterHashtable @{LogName='System'; ProviderName='Microsoft-Windows-Kernel-General'; Id=1; StartTime=(Get-Date).AddHours(-8)} | Format-List TimeCreated, Message
+TimeCreated is local time (UTC+1); the times inside the messages are UTC.
+
+== msi (the always-on PC; its recorder started at 2026-11-27 22:40:29 UTC), run at about 2026-11-28 02:50 local; messages in English
+
+TimeCreated : 27.11.2026 23:26:09
+Message     : The system time has changed to ‎2026‎-‎11‎-‎27T22:26:09.077935100Z from ‎2026‎-‎11‎-‎27T22:26:09.07818830
+              0Z.
+              Time Delta: 0 ms
+
+              Change Reason: An application or system component changed the time.
+              Process: '\Device\HarddiskVolume3\Windows\System32\svchost.exe' (PID 19572).
+
+              RTC time: ‎2026‎-‎11‎-‎27T23:26:09.077935100Z
+              Current time zone bias: -60
+              RTC time is in UTC: false
+              System time was based on RTC time: false
+
+TimeCreated : 27.11.2026 23:26:08
+Message     : The system time has changed to ‎2026‎-‎11‎-‎27T22:26:07.945981100Z from ‎2026‎-‎11‎-‎27T22:26:07.94492540
+              0Z.
+              Time Delta: 1 ms
+
+              Change Reason: An application or system component changed the time.
+              Process: '\Device\HarddiskVolume3\Windows\System32\svchost.exe' (PID 19572).
+
+              RTC time: ‎2026‎-‎11‎-‎27T23:26:07.945981100Z
+              Current time zone bias: -60
+              RTC time is in UTC: false
+              System time was based on RTC time: false
+
+TimeCreated : 27.11.2026 23:26:07
+Message     : The system time has changed to ‎2026‎-‎11‎-‎27T22:26:07.864879800Z from ‎2026‎-‎11‎-‎27T22:26:05.62774690
+              0Z.
+              Time Delta: 2237 ms
+
+              Change Reason: An application or system component changed the time.
+              Process: '\Device\HarddiskVolume3\Windows\System32\svchost.exe' (PID 19572).
+
+              RTC time: ‎2026‎-‎11‎-‎27T23:26:07.864879800Z
+              Current time zone bias: -60
+              RTC time is in UTC: false
+              System time was based on RTC time: false
+
+== huawei (the laptop; its recorder stopped at 2026-11-28 00:01 UTC), run at about 2026-11-28 02:50 local; messages in Turkish
+
+TimeCreated : 28.11.2026 02:16:28
+Message     : Sistem saati ‎2026‎-‎11‎-‎28T01:16:28.500000000Z olarak ‎2026‎-‎11‎-‎28T00:50:59.706594900Z.
+              Saat Aralığı: 1528793 ms
+              
+              Değiştirme Nedeni: System time synchronized with the hardware clock.
+              İşlem: '' (PID 4).
+              
+              RTC saati: ‎2026‎-‎11‎-‎28T02:16:28.500000000Z
+              Geçerli saat dilimi sapması: -60
+              RTC saati UTC: false
+              Sistem saati RTC saat: false

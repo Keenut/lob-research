@@ -7,12 +7,14 @@ book and replay engine checked against that reference, and clock-corrected laten
 **Status: in progress.** Data capture, the Python reference book, the C++ engine and the
 clock/latency analysis are done. The microstructure research and the trading simulator are planned.
 
-All numbers below were measured on the 24 UTC hour files `2026-11-24T23` to `2026-11-25T22`
-and come from the reports in [`docs/`](docs/). All times are UTC.
+Unless a section names another window, the numbers below were measured on the 24 UTC hour files
+`2026-11-24T23` to `2026-11-25T22`. All of them come from the reports in [`docs/`](docs/). All times
+are UTC.
 
 | Component | State |
 |---|---|
 | Recorder, continuity checker, ETL to Parquet, DuckDB queries | done |
+| Second, always-on recorder PC; two independent captures of the same streams compared message by message | done |
 | Python reference L2 book, validated against REST snapshots | done |
 | Clock offset to the exchange, corrected latency | done |
 | C++17 L2 book and replay engine (pybind11): sorted vector, `std::map` and a price ladder designed from a profile of the update stream; differential tests against the Python reference; benchmark | done |
@@ -33,6 +35,8 @@ Binance spot, BTCUSDT
         |                    |
  check_continuity.py      etl.py       finished hours only, atomic writes
  (gaps, holes, errors)       |
+ compare_captures.py         |
+ (two PCs, same streams)     |
    data/parquet/BTCUSDT/<table>/<UTC hour>.parquet
         |                    |                       |
    explore.py         replay.py + book.py        clock.py
@@ -60,6 +64,7 @@ pip install -r requirements.txt
 python recorder.py                                   # terminal 1: records and reconnects by itself
 python etl.py                                        # terminal 2: converts every finished UTC hour
 python check_continuity.py data\raw\BTCUSDT\*.log*   # sequence gaps, holes between sessions, errors
+python compare_captures.py --b data\raw_msi          # the same hours recorded by another PC
 python compress_raw.py                               # gzip finished raw hours (lossless, verified)
 python replay.py                                     # rebuilds the book, validates the top 100 levels
 python clock.py                                      # clock offset and corrected latency
@@ -83,7 +88,8 @@ python bench.py                                      # speed (data already in me
 
 One record per line: `<rx_ns> <session> <kind> <payload>`. Finished hours can be gzip-compressed to
 `<YYYY-MM-DDTHH>.log.gz` by `compress_raw.py` (lossless: the decompressed bytes are checked against
-the original with SHA-256 before the `.log` is deleted); `etl.py` and `check_continuity.py` read both.
+the original with SHA-256 before the `.log` is deleted); `etl.py`, `check_continuity.py` and
+`compare_captures.py` read both.
 
 | Field | Meaning |
 |---|---|
@@ -331,6 +337,68 @@ Corrected one-way latency, last session (21:46–22:59, 100 % covered by clock s
   delayed, not lost (0 sequence gaps).
 - Consequence for research: use the exchange time `E` as the event clock and `rx` only to model latency.
 
+## Two independent captures of the same streams ([`capture_comparison_2026-11-27.txt`](docs/capture_comparison_2026-11-27.txt))
+
+Since 2026-11-27 22:40:29 the recorder runs on a second, always-on PC (`msi` in the report). The
+laptop that recorded so far (`huawei`) kept recording until 2026-11-28 00:01, so the same streams
+were recorded twice: on two PCs of the same home network, each with its own WebSocket connection.
+`compare_captures.py` compares the two raw logs directly, with no ETL in between:
+
+- a depth event is identified by its first and last update id `(U, u)`, a trade by its trade id;
+  messages are compared through 128-bit BLAKE2b digests of the raw message and of each field;
+- a message that only one capture has, within the ids both captures span, is classified: the other
+  capture was not connected (a hole between its sessions), a gap inside one of the other's sessions
+  (a real loss), or other event boundaries (`[U, u]` ranges that intersect without being equal).
+
+Window: the hour files `2026-11-27T22` and `2026-11-27T23`; messages in both from E = 22:40:29.614 to
+23:59:59.814 (79.5 min). Each capture was a single session without update-id or trade-id gaps.
+Neither PC's clock was stepped during the window
+([`windows_time_events_2026-11-27.txt`](docs/windows_time_events_2026-11-27.txt)): the always-on PC
+was synchronized at 22:26:07 (+2,237 ms), and the laptop's only clock change in those hours came at
+01:16, after its recorder had stopped (the time restored from the hardware clock after sleep).
+
+| | Depth events | Trades |
+|---|---|---|
+| In both captures | 47,196 | 88,519 |
+| In the window, only in one capture (hole, loss or other boundaries) | 0 | 0 |
+| Event pairs whose `[U, u]` intersect without being equal | 0 | – |
+| Raw message identical byte for byte | 46,994 (99.57 %) | 80,331 (90.75 %) |
+| Messages with a different field | 202, only `E` | 8,188, only `E` |
+| `E` difference where it differs (`huawei` − `msi`) | −1 to +7 ms, median +1 | −1 to +4 ms, median +1 |
+
+- **Nothing lost, nothing changed:** in the common window, every message of one capture is in the
+  other; the bid and ask levels of all 47,196 depth events and every trade field except `E` are
+  identical.
+- **The same event boundaries on both connections:** the 100 ms batches carry the same `(U, u)`. Two
+  captures can therefore be merged by update id and trade id to fill each other's holes (not done yet).
+- **`E` is not the same on both connections:** it differs by a few ms in 0.43 % of the depth events
+  and 9.25 % of the trades. It is not an identifier across connections; `(U, u)` and the trade id
+  are. A difference of at most 7 ms is small next to the 100 ms batches.
+
+Latency of the same messages on both PCs, corrected with each PC's own clock samples (the method of
+`clock.py`). Both PCs used the same network, so a difference comes from the PCs and their links to
+the router, not from the route to Binance.
+
+| | `huawei` | `msi` |
+|---|---|---|
+| Clock samples, of which good (RTT <= min + 20 ms) | 119, 111 | 80, 6 |
+| Clock offset (median), drift | +1,557.2 ms, +74.9 ms/h | −28.1 ms, −24.9 ms/h |
+| Depth `rx − E` corrected, p50 / p99 | 120 / 132 ms | 112 / 134 ms |
+| p50 bounds without the symmetric-path assumption | [−1, 242] ms | [−2, 228] ms |
+| Depth events with a correction (a good sample within 10 min) | 100.0 % | 88.4 % |
+
+- Receive time of the same depth event, `huawei` − `msi`, corrected: p10 −1.7, p50 7.4, p90 10.7 ms
+  (p1 −7.5, p99 16.8). The spread is small; the constant part is not identifiable (p50 bounds
+  [−229.3, 244.2] ms), so the clock samples cannot tell which PC receives a message first.
+- Trades have the same centre (p10 −6.7, p50 5.2, p90 10.8 ms) but wide tails: p1 −229.6 and p99
+  241.6 ms, close to one REST round trip (minimum RTT 225–235 ms). Their origin is not investigated.
+- The laptop's corrected p50 (120 ms) and drift (+74.9 ms/h, about 20 ppm) are close to those of
+  2026-11-25 (120 ms; 73.8 to 75.9 ms/h).
+  The always-on PC's REST round trips vary more (RTT p50 287 ms, min 225 ms), so only 6 of its 80
+  samples pass the 20 ms filter.
+- One minute of 80 had a latency spike (max − median of `rx − E` > 500 ms within a minute of exchange
+  time): 22:58, on the laptop only (724 ms; 269 ms on the always-on PC).
+
 ## C++ engine: agreement and speed
 
 ### Agreement with the Python reference ([`crosscheck_top1000.txt`](docs/crosscheck_top1000.txt))
@@ -405,8 +473,9 @@ order and output the top of book after every event. The ladder keeps that order 
 - A snapshot shows at most 5000 levels per side: deeper levels that do not change after sync are
   unknown (the *untracked* mismatches above). Research features will use the top levels.
 - After a sequence gap the book would wait for the next snapshot, up to 10 min (no gap occurred here).
-- One machine, one connection: every reconnect leaves a hole (81.2 s for 4 reconnects here). A second,
-  independent recorder could fill them.
+- One connection per PC: every reconnect leaves a hole (81.2 s for 4 reconnects in the 24 h window).
+  Captures from two PCs could fill each other's holes (their event boundaries are identical), but
+  none are merged yet; the two captures overlap only for 79.5 minutes of one night, on one network.
 - Clock: the absolute one-way latency is uncertain by about ±RTT/2 (≈ ±120 ms) from the clock samples
   alone; clock samples exist only from 21:46 on 2026-11-25; the PC clock drifts about 20 ppm and was
   stepped twice in the window. `clock.py` interpolates linearly between good samples, so a future step
@@ -435,6 +504,7 @@ order and output the top of book after every event. The ladder keeps that order 
 |---|---|
 | `recorder.py` | asyncio recorder: WebSocket depth + trades, REST snapshots (a failed one is retried within seconds, rate limits respected), clock samples, reconnection with backoff |
 | `check_continuity.py` | sequence continuity per session, holes between sessions, logged errors, raw latency (reads raw logs) |
+| `compare_captures.py` | two raw captures of the same streams (two PCs): messages in both or in one only (hole, loss, other event boundaries), byte and field comparison, latency of the same messages on both PCs |
 | `etl.py` | raw logs → Parquet tables, one file per table per UTC hour |
 | `compress_raw.py` | gzip finished raw hours, verified, to save disk space |
 | `explore.py` | DuckDB queries: row counts, gaps cross-check, trades, errors, latency spikes, clock steps |
@@ -449,7 +519,7 @@ order and output the top of book after every event. The ladder keeps that order 
 | `bookdata.py` | Parquet → integer NumPy arrays for the C++ engine |
 | `crosscheck.py` | runs the Python reference and the C++ engines (vector, map, price ladder 2^16 and 2^18) on the same data and checks that they agree |
 | `bench.py` | speed of the engines on in-memory data; per-event times split by sync, snapshot check and window move; profile of where the updates land, in levels and in ticks |
-| `tests/` | pytest: the recorder's snapshot retry policy (fake HTTP session); book operations and comparison; sync, gap/resync, stale events, validation and mismatch classification; end-to-end raw log → ETL → Parquet → replay on a synthetic market with a known true book; clock offset recovery, path-asymmetry bias, drift, interpolation; C++ books and replay against the Python reference on scenarios, random multi-session streams and Parquet |
+| `tests/` | pytest: the recorder's snapshot retry policy (fake HTTP session); book operations and comparison; sync, gap/resync, stale events, validation and mismatch classification; end-to-end raw log → ETL → Parquet → replay on a synthetic market with a known true book; clock offset recovery, path-asymmetry bias, drift, interpolation; C++ books and replay against the Python reference on scenarios, random multi-session streams and Parquet; two synthetic captures with holes, changed fields, split and shifted event boundaries, gaps, duplicates and known clock offsets |
 | `docs/` | the reports quoted above |
 | `data/` | raw logs and Parquet (git-ignored) |
 
@@ -467,6 +537,8 @@ Reports in `docs/` and the commands that produced them:
 | `crosscheck_top1000.txt` | `python crosscheck.py --max-files 24 --top 1000` |
 | `benchmark.txt` | `python bench.py --max-files 24` (plugged in, power mode "Best performance") |
 | `windows_time_events.txt` | `Get-WinEvent` on the System log, Kernel-General event 1 (times in the `TimeCreated` lines are local, UTC+1; message language: Turkish) |
+| `capture_comparison_2026-11-27.txt` | `python compare_captures.py --a data\raw --label-a huawei --b data\raw_msi --label-b msi` (the always-on PC's hours copied to `data\raw_msi`) |
+| `windows_time_events_2026-11-27.txt` | the same `Get-WinEvent` command on both PCs, 8 hours back |
 
 ## References
 
