@@ -6,6 +6,7 @@ Usage (PowerShell, from the repo root, after building cpp/):
     python crosscheck.py                          # all converted hours, top 100 levels per side
     python crosscheck.py --top 1000 --every 50    # deeper checks, more top-of-book samples
     python crosscheck.py --max-files 2            # quick run
+    python crosscheck.py --from 2026-11-26T00 --to 2026-11-26T23   # a window of UTC hours (both included)
 
 What is compared:
   1. every session result (event counts, gaps, syncs, every snapshot check with its full mismatch
@@ -55,12 +56,12 @@ def main():
     ap.add_argument("--parquet", type=Path, default=Path("data/parquet"))
     ap.add_argument("--top", type=int, default=100, help="levels per side compared with each snapshot")
     ap.add_argument("--every", type=int, default=100, help="sample the Python top of book every N events")
-    ap.add_argument("--max-files", type=int, default=None)
+    replay.add_window_args(ap)
     a = ap.parse_args()
     base = a.parquet / a.symbol
-    stems = replay.hour_stems(base, a.max_files)
+    stems = replay.hour_stems(base, a.max_files, a.first, a.last)
     if not stems:
-        sys.exit(f"no Parquet files in {base}")
+        sys.exit(f"no Parquet files for these hours in {base}")
     print(f"hours {stems[0]} .. {stems[-1]} ({len(stems)} files), top {a.top} levels per side\n")
 
     # 1. Python reference, with the top of book sampled after every --every-th event (if applied)

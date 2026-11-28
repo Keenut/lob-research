@@ -3,6 +3,7 @@ r"""replay.py: rebuild the L2 order book from the Parquet tables and validate it
 Usage (PowerShell, from the repo root, after python etl.py):
     python replay.py                          # all converted hours, compare the top 100 levels per side
     python replay.py --max-files 2            # quick run on the first 2 hours
+    python replay.py --from 2026-11-24T23 --to 2026-11-25T22   # a window of UTC hours (both included)
     python replay.py --top 1000 --csv docs\validation_top1000.csv
     python replay.py --engine cpp             # same replay with the C++ engine (build cpp/ first)
 
@@ -33,6 +34,7 @@ So each mismatch is classified:
 """
 import argparse
 import csv
+import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -75,9 +77,29 @@ class Check(NamedTuple):
 
 # ---------------------------------------------------------------- loading (Parquet -> Python objects)
 
-def hour_stems(base, max_files=None):
+def hour_stems(base, max_files=None, first=None, last=None):
+    """The converted UTC hours (file stems of the depth_events table, e.g. '2026-11-25T22'), sorted:
+    from hour `first` to hour `last`, both included (None: no bound), then only the first max_files."""
     stems = sorted(p.stem for p in (base / "depth_events").glob("*.parquet"))
+    stems = [s for s in stems if (first is None or s >= first) and (last is None or s <= last)]
     return stems[:max_files] if max_files else stems
+
+
+def hour_arg(text):
+    """argparse type of --from / --to: a UTC hour written like the file names, YYYY-MM-DDTHH.
+    The hours are compared as text, so any other spelling would select a wrong window silently."""
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}", text):
+        raise argparse.ArgumentTypeError(f"{text!r}: write the hour like the file names, e.g. 2026-11-25T22")
+    return text
+
+
+def add_window_args(ap):
+    """The options that choose the hours of a report: --from, --to and --max-files."""
+    ap.add_argument("--from", dest="first", type=hour_arg, metavar="HOUR",
+                    help="first UTC hour, e.g. 2026-11-24T23 (default: the first converted hour)")
+    ap.add_argument("--to", dest="last", type=hour_arg, metavar="HOUR",
+                    help="last UTC hour, included (default: the last converted hour)")
+    ap.add_argument("--max-files", type=int, default=None, help="only the first N hours of the window")
 
 
 def iter_depth_events(base, stems):
@@ -375,7 +397,7 @@ def main():
     ap.add_argument("--symbol", default="BTCUSDT")
     ap.add_argument("--parquet", type=Path, default=Path("data/parquet"))
     ap.add_argument("--top", type=int, default=100, help="levels per side compared with each snapshot")
-    ap.add_argument("--max-files", type=int, default=None, help="only the first N hour files")
+    add_window_args(ap)
     ap.add_argument("--csv", type=Path, default=None, help="write one row per snapshot check")
     ap.add_argument("--engine", choices=("python", "cpp", "cpp-map", "cpp-ladder"), default="python",
                     help="python: reference; cpp / cpp-map / cpp-ladder: C++ engine with a vector / "
@@ -383,9 +405,9 @@ def main():
     a = ap.parse_args()
 
     base = a.parquet / a.symbol
-    stems = hour_stems(base, a.max_files)
+    stems = hour_stems(base, a.max_files, a.first, a.last)
     if not stems:
-        print(f"no Parquet files in {base / 'depth_events'} (run python etl.py first)")
+        print(f"no Parquet files for these hours in {base / 'depth_events'} (run python etl.py first)")
         return
     t0 = time.time()
     if a.engine == "python":

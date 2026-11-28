@@ -1,0 +1,101 @@
+﻿
+
+TimeCreated : 28.11.2026 02:16:28
+Message     : Sistem saati ‎2026‎-‎11‎-‎28T01:16:28.500000000Z olarak ‎2026‎-‎11‎-‎28T00:50:59.706594900Z.
+              Saat Aralığı: 1528793 ms
+              
+              Değiştirme Nedeni: System time synchronized with the hardware clock.
+              İşlem: '' (PID 4).
+              
+              RTC saati: ‎2026‎-‎11‎-‎28T02:16:28.500000000Z
+              Geçerli saat dilimi sapması: -60
+              RTC saati UTC: false
+              Sistem saati RTC saat: false
+
+TimeCreated : 27.11.2026 02:40:29
+Message     : Sistem saati ‎2026‎-‎11‎-‎27T01:40:29.355550700Z olarak ‎2026‎-‎11‎-‎27T01:40:29.355659000Z.
+              Saat Aralığı: 0 ms
+              
+              Değiştirme Nedeni: An application or system component changed the time.
+              İşlem: '\Device\HarddiskVolume3\Windows\System32\svchost.exe' (PID 16520).
+              
+              RTC saati: ‎2026‎-‎11‎-‎27T02:40:29.355550700Z
+              Geçerli saat dilimi sapması: -60
+              RTC saati UTC: false
+              Sistem saati RTC saat: false
+
+TimeCreated : 27.11.2026 02:40:29
+Message     : Sistem saati ‎2026‎-‎11‎-‎27T01:40:29.353908500Z olarak ‎2026‎-‎11‎-‎27T01:40:29.353386200Z.
+              Saat Aralığı: 0 ms
+              
+              Değiştirme Nedeni: An application or system component changed the time.
+              İşlem: '\Device\HarddiskVolume3\Windows\System32\svchost.exe' (PID 16520).
+              
+              RTC saati: ‎2026‎-‎11‎-‎27T02:40:29.353908500Z
+              Geçerli saat dilimi sapması: -60
+              RTC saati UTC: false
+              Sistem saati RTC saat: false
+
+TimeCreated : 27.11.2026 02:40:29
+Message     : Sistem saati ‎2026‎-‎11‎-‎27T01:40:29.352089800Z olarak ‎2026‎-‎11‎-‎27T01:40:27.146431200Z.
+              Saat Aralığı: 2205 ms
+              
+              Değiştirme Nedeni: An application or system component changed the time.
+              İşlem: '\Device\HarddiskVolume3\Windows\System32\svchost.exe' (PID 16520).
+              
+              RTC saati: ‎2026‎-‎11‎-‎27T02:40:29.352089800Z
+              Geçerli saat dilimi sapması: -60
+              RTC saati UTC: false
+              Sistem saati RTC saat: false
+
+TimeCreated : 26.11.2026 02:40:27
+Message     : Sistem saati ‎2026‎-‎11‎-‎26T01:40:27.143338400Z olarak ‎2026‎-‎11‎-‎26T01:40:27.142610900Z.
+              Saat Aralığı: 0 ms
+              
+              Değiştirme Nedeni: An application or system component changed the time.
+              İşlem: '\Device\HarddiskVolume3\Windows\System32\svchost.exe' (PID 24052).
+              
+              RTC saati: ‎2026‎-‎11‎-‎26T02:40:27.143338400Z
+              Geçerli saat dilimi sapması: -60
+              RTC saati UTC: false
+              Sistem saati RTC saat: false
+
+TimeCreated : 25.11.2026 20:29:25
+Message     : Sistem saati ‎2026‎-‎11‎-‎25T19:29:25.121155900Z olarak ‎2026‎-‎11‎-‎25T19:29:25.120324800Z.
+              Saat Aralığı: 0 ms
+              
+              Değiştirme Nedeni: An application or system component changed the time.
+              İşlem: '\Device\HarddiskVolume3\Windows\System32\svchost.exe' (PID 3472).
+              
+              RTC saati: ‎2026‎-‎11‎-‎25T20:29:25.121155900Z
+              Geçerli saat dilimi sapması: -60
+              RTC saati UTC: false
+              Sistem saati RTC saat: false
+
+TimeCreated : 25.11.2026 20:29:25
+Message     : Sistem saati ‎2026‎-‎11‎-‎25T19:29:25.120002200Z olarak ‎2026‎-‎11‎-‎25T19:29:25.119494200Z.
+              Saat Aralığı: 0 ms
+              
+              Değiştirme Nedeni: An application or system component changed the time.
+              İşlem: '\Device\HarddiskVolume3\Windows\System32\svchost.exe' (PID 3472).
+              
+              RTC saati: ‎2026‎-‎11‎-‎25T20:29:25.120002200Z
+              Geçerli saat dilimi sapması: -60
+              RTC saati UTC: false
+              Sistem saati RTC saat: false
+
+TimeCreated : 25.11.2026 20:29:25
+Message     : Sistem saati ‎2026‎-‎11‎-‎25T19:29:25.118405500Z olarak ‎2026‎-‎11‎-‎25T19:29:23.578815100Z.
+              Saat Aralığı: 1539 ms
+              
+              Değiştirme Nedeni: An application or system component changed the time.
+              İşlem: '\Device\HarddiskVolume3\Windows\System32\svchost.exe' (PID 3472).
+              
+              RTC saati: ‎2026‎-‎11‎-‎25T20:29:25.118405500Z
+              Geçerli saat dilimi sapması: -60
+              RTC saati UTC: false
+              Sistem saati RTC saat: false
+
+
+
+

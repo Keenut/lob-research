@@ -3,6 +3,7 @@ r"""clock.py: this PC's clock offset to Binance (from the 'clk' samples) and cor
 Usage (PowerShell, from the repo root, after python etl.py):
     python clock.py                    # clock report + latency per session and per UTC hour
     python clock.py --slack-ms 10      # stricter filter for 'good' clock samples
+    python clock.py --from 2026-11-24T23 --to 2026-11-25T22   # a window of UTC hours (both included)
 
 Clock sample (recorder.py, every 60 s): local times t0, t1 around GET /api/v3/time -> serverTime (ms).
     offset = serverTime - (t0 + t1) / 2        Binance time - local time; positive: this PC is behind
@@ -29,6 +30,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
+
+import replay
 
 
 # ---------------------------------------------------------------- pure functions (tested)
@@ -92,12 +95,16 @@ def latency(rx_ns, exch_ms, good, max_gap_ms):
 
 # ---------------------------------------------------------------- loading and report
 
-def read_table(base, table, columns):
-    """All hour files of one Parquet table as {column: numpy array}."""
+def read_table(base, table, columns, stems=None):
+    """The hour files of one Parquet table as {column: numpy array}: all of them, or those of the given
+    hours (stems such as '2026-11-25T22'; an hour without rows in this table has no file)."""
     import pyarrow as pa
     import pyarrow.parquet as pq
 
-    files = sorted((base / table).glob("*.parquet"))
+    if stems is None:
+        files = sorted((base / table).glob("*.parquet"))
+    else:
+        files = [f for f in (base / table / f"{stem}.parquet" for stem in stems) if f.exists()]
     if not files:
         return {c: np.array([]) for c in columns}
     t = pa.concat_tables([pq.read_table(f, columns=columns) for f in files])
@@ -128,11 +135,17 @@ def main():
     ap.add_argument("--parquet", type=Path, default=Path("data/parquet"))
     ap.add_argument("--slack-ms", type=float, default=20.0, help="good sample: rtt <= min rtt + slack")
     ap.add_argument("--max-gap-s", type=float, default=600.0, help="max distance to the nearest good sample")
+    replay.add_window_args(ap)
     a = ap.parse_args()
     base = a.parquet / a.symbol
     max_gap_ms = a.max_gap_s * 1000
+    stems = replay.hour_stems(base, a.max_files, a.first, a.last)
+    if not stems:
+        print(f"no Parquet files for these hours in {base / 'depth_events'} (run python etl.py first)")
+        return
+    print(f"hours {stems[0]} .. {stems[-1]} ({len(stems)} files)")
 
-    clk = read_table(base, "clock", ["server_ms", "offset_ms", "rtt_ms"])
+    clk = read_table(base, "clock", ["server_ms", "offset_ms", "rtt_ms"], stems)
     samples = clock_samples(clk["server_ms"], clk["offset_ms"], clk["rtt_ms"])
     if len(samples["t_ms"]) == 0:
         print("no clock samples: run the updated recorder.py, then python etl.py")
@@ -150,9 +163,9 @@ def main():
     b, sd, step = drift(good)
     print(f"drift: {b:+.1f} ms/h (linear fit), residual sd {sd:.1f} ms, largest step between good samples {step:.1f} ms")
 
-    ev = read_table(base, "depth_events", ["rx_ns", "session", "event_ms"])
+    ev = read_table(base, "depth_events", ["rx_ns", "session", "event_ms"], stems)
     raw, corr = report_messages("depth events (rx - E)", ev["rx_ns"], ev["session"], ev["event_ms"], good, max_gap_ms)
-    tr = read_table(base, "trades", ["rx_ns", "session", "trade_ms"])
+    tr = read_table(base, "trades", ["rx_ns", "session", "trade_ms"], stems)
     report_messages("trades (rx - T, trade time)", tr["rx_ns"], tr["session"], tr["trade_ms"], good, max_gap_ms)
 
     print("\n== depth events per UTC hour (covered events only): raw drifts with the clock, corrected should not")

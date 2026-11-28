@@ -17,6 +17,7 @@ are UTC.
 | Second, always-on recorder PC; two independent captures of the same streams compared message by message | done |
 | Python reference L2 book, validated against REST snapshots | done |
 | Clock offset to the exchange, corrected latency | done |
+| Data quality per UTC day (time and book coverage, holes, gaps, snapshot checks); every report reproducible on a window of hours | done |
 | C++17 L2 book and replay engine (pybind11): sorted vector, `std::map` and a price ladder designed from a profile of the update stream; differential tests against the Python reference; benchmark | done |
 | Microstructure research (spread, depth imbalance, order flow imbalance, microprice, short-horizon prediction) | planned |
 | Simulator (Avellaneda–Stoikov quoting, signal-based taking, fees, latency and queue models, P&L attribution) | planned |
@@ -69,6 +70,8 @@ python compress_raw.py                               # gzip finished raw hours (
 python replay.py                                     # rebuilds the book, validates the top 100 levels
 python clock.py                                      # clock offset and corrected latency
 python explore.py                                    # DuckDB sanity, latency spike and clock step queries
+python days.py                                       # data quality per UTC day (coverage, book, snapshot checks)
+# replay, crosscheck, bench, clock, explore and days take --from / --to (UTC hours, e.g. 2026-11-24T23)
 python -m pytest -q                                  # tests
 
 # C++ engine: Visual Studio 2022 with "Desktop development with C++", venv active
@@ -337,6 +340,35 @@ Corrected one-way latency, last session (21:46–22:59, 100 % covered by clock s
   delayed, not lost (0 sequence gaps).
 - Consequence for research: use the exchange time `E` as the event clock and `rx` only to model latency.
 
+## Data quality per day ([`days_huawei.txt`](docs/days_huawei.txt))
+
+A walk-forward evaluation by day needs complete days. `days.py` replays the laptop's whole recording
+(the hour files `2026-11-24T23` to `2026-11-27T23`) once and cuts the results at midnight UTC:
+
+| Day (UTC) | Hours | Time coverage | Book coverage | Holes, longest | Sequence gaps | Snapshot checks (top 1000) | Mismatched levels | Unexplained |
+|---|---|---|---|---|---|---|---|---|
+| 2026-11-24 (from 23:02) | 1 | 3.21 % | 3.21 % | 1, 692.2 s | 0 | 4 | 0 | 0 |
+| 2026-11-25 | 24 | 99.84 % | 99.84 % | 5, 53.6 s | 0 | 141 | 344 | 0 |
+| 2026-11-26 | 24 | 99.82 % | 99.82 % | 7, 65.2 s | 0 | 139 | 0 | 0 |
+| 2026-11-27 | 24 | 95.21 % | 94.68 % | 28, 2,376.6 s | 0 | 126 | 1,171 | 0 |
+
+- Time coverage: the share of the 86,400 s of the day between the first and the last depth event of a
+  session (receive time). Book coverage: the share with a synced book, from a sync to a sequence gap
+  or to the end of the session, as decided by the state machine of `replay.py`.
+- No sequence gap and no unexplained mismatch on any day. Every mismatched level is *untracked*
+  (beyond the depth of the sync snapshot); the 344 of 2026-11-25 are those of the 24 h validation.
+- 2026-11-25 and 2026-11-26 are complete days. 2026-11-27 lost 4,139.1 s in 28 holes, the longest
+  2,376.6 s. Its book coverage is 0.53 points below its time coverage: 29 sessions had data that day
+  (one began on 2026-11-26) and only 27 synced, with no sequence gap, so one session never synced.
+  Since commit a1d3955 the recorder retries a failed snapshot request after 5 s instead of waiting
+  10 minutes for the next one.
+- Clock after the 24 h window ([`windows_time_events_2026-11-25_28.txt`](docs/windows_time_events_2026-11-25_28.txt)):
+  the laptop's clock was stepped by +2,205 ms on 2026-11-27 at 01:40:29, and a change of 0 ms was
+  logged on 2026-11-26 at 01:40:27. The research uses the exchange time `E`, so this matters only for
+  latency on those days.
+- Which days the research will use is decided with it; no threshold is applied here. The always-on
+  PC's days will get their own report.
+
 ## Two independent captures of the same streams ([`capture_comparison_2026-11-27.txt`](docs/capture_comparison_2026-11-27.txt))
 
 Since 2026-11-27 22:40:29 the recorder runs on a second, always-on PC (`msi` in the report). The
@@ -494,9 +526,9 @@ order and output the top of book after every event. The ladder keeps that order 
 - Price ladder: a window move and a sync cost O(W) (the array is moved or cleared, 2 MiB per side);
   the window size is a compile-time constant chosen for BTCUSDT's tick and price; deep levels stay in a
   `std::map`; `probe()` (profiling only) and listing every level are O(W).
-- `explore.py` and `clock.py` read every converted hour: re-running them after converting more hours
-  changes the numbers (`replay.py`, `crosscheck.py` and `bench.py` take `--max-files 24`). The reports in
-  `docs/` were produced on the 24 hours above.
+- Every hour of the laptop's recording is now converted. The 24 h reports in `docs/` are reproduced
+  with `--from 2026-11-24T23 --to 2026-11-25T22` (or `--max-files 24`); this was checked for `replay.py`,
+  `clock.py` and `explore.py`: the same output apart from the line naming the hours and the wall time.
 
 ## Repository layout
 
@@ -510,6 +542,7 @@ order and output the top of book after every event. The ladder keeps that order 
 | `explore.py` | DuckDB queries: row counts, gaps cross-check, trades, errors, latency spikes, clock steps |
 | `book.py` | reference L2 book (two dicts) and top-N comparison with a snapshot |
 | `replay.py` | per-session sync / gap / resync state machine, snapshot validation, mismatch classification |
+| `days.py` | data quality per UTC day: time and book coverage, holes, sequence gaps, snapshot checks |
 | `clock.py` | clock offset from the samples, drift, corrected latency with bounds |
 | `cpp/include/lob/book.hpp` | C++ L2 book: integer ticks and lots; sorted vector, `std::map` or price-ladder sides |
 | `cpp/include/lob/replay.hpp` | C++ version of the replay state machine, optional timing and depth profiling |
@@ -519,7 +552,7 @@ order and output the top of book after every event. The ladder keeps that order 
 | `bookdata.py` | Parquet → integer NumPy arrays for the C++ engine |
 | `crosscheck.py` | runs the Python reference and the C++ engines (vector, map, price ladder 2^16 and 2^18) on the same data and checks that they agree |
 | `bench.py` | speed of the engines on in-memory data; per-event times split by sync, snapshot check and window move; profile of where the updates land, in levels and in ticks |
-| `tests/` | pytest: the recorder's snapshot retry policy (fake HTTP session); book operations and comparison; sync, gap/resync, stale events, validation and mismatch classification; end-to-end raw log → ETL → Parquet → replay on a synthetic market with a known true book; clock offset recovery, path-asymmetry bias, drift, interpolation; C++ books and replay against the Python reference on scenarios, random multi-session streams and Parquet; two synthetic captures with holes, changed fields, split and shifted event boundaries, gaps, duplicates and known clock offsets |
+| `tests/` | pytest: the recorder's snapshot retry policy (fake HTTP session); book operations and comparison; sync, gap/resync, stale events, validation and mismatch classification; end-to-end raw log → ETL → Parquet → replay on a synthetic market with a known true book; clock offset recovery, path-asymmetry bias, drift, interpolation; C++ books and replay against the Python reference on scenarios, random multi-session streams and Parquet; two synthetic captures with holes, changed fields, split and shifted event boundaries, gaps, duplicates and known clock offsets; the hour windows of the reports; per-day intervals cut at midnight, and two sessions across midnight with a hole and a sequence gap |
 | `docs/` | the reports quoted above |
 | `data/` | raw logs and Parquet (git-ignored) |
 
@@ -528,17 +561,19 @@ Reports in `docs/` and the commands that produced them:
 | Report | Command |
 |---|---|
 | `continuity_report.txt` | `python check_continuity.py` on the 24 raw hour files |
-| `explore_report.txt` | `python explore.py` |
+| `explore_report.txt` | `python explore.py --from 2026-11-24T23 --to 2026-11-25T22` |
 | `replay_top100.txt` | `python replay.py --max-files 24` |
 | `replay_top1000.txt`, `validation_top1000.csv` | `python replay.py --max-files 24 --top 1000 --csv docs\validation_top1000.csv` |
 | `replay_top5000.txt`, `validation_top5000.csv` | `python replay.py --max-files 24 --top 5000 --csv docs\validation_top5000.csv` |
-| `clock_report.txt` | `python clock.py` |
-| `clock_report_slack40.txt` | `python clock.py --slack-ms 40` |
+| `clock_report.txt` | `python clock.py --from 2026-11-24T23 --to 2026-11-25T22` |
+| `clock_report_slack40.txt` | `python clock.py --slack-ms 40 --from 2026-11-24T23 --to 2026-11-25T22` |
 | `crosscheck_top1000.txt` | `python crosscheck.py --max-files 24 --top 1000` |
 | `benchmark.txt` | `python bench.py --max-files 24` (plugged in, power mode "Best performance") |
 | `windows_time_events.txt` | `Get-WinEvent` on the System log, Kernel-General event 1 (times in the `TimeCreated` lines are local, UTC+1; message language: Turkish) |
 | `capture_comparison_2026-11-27.txt` | `python compare_captures.py --a data\raw --label-a huawei --b data\raw_msi --label-b msi` (the always-on PC's hours copied to `data\raw_msi`) |
 | `windows_time_events_2026-11-27.txt` | the same `Get-WinEvent` command on both PCs, 8 hours back |
+| `days_huawei.txt` | `python days.py --top 1000 --from 2026-11-24T23 --to 2026-11-27T23` |
+| `windows_time_events_2026-11-25_28.txt` | the same `Get-WinEvent` command on the laptop with `StartTime=[datetime]'2026-11-25 19:00'` (local time) |
 
 ## References
 

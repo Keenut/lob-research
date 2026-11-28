@@ -5,6 +5,7 @@ Usage (PowerShell, from the repo root, after building cpp/ in Release):
     python bench.py                                   # all converted hours
     python bench.py --max-files 4 --repeat 5 --python-hours 1
     python bench.py --max-files 24 --profile-only     # sections 4-6 only (no timings)
+    python bench.py --from 2026-11-26T00 --to 2026-11-26T23   # a window of UTC hours (both included)
 
 What it measures:
   1. throughput on all hours: wall time of the process() calls only (the replay state machine, the book
@@ -135,7 +136,7 @@ def main():
     ap = argparse.ArgumentParser(description="Benchmark of the replay engines on in-memory data")
     ap.add_argument("--symbol", default="BTCUSDT")
     ap.add_argument("--parquet", type=Path, default=Path("data/parquet"))
-    ap.add_argument("--max-files", type=int, default=None, help="only the first N hours")
+    replay.add_window_args(ap)
     ap.add_argument("--repeat", type=int, default=3, help="timed runs per engine (after one warm-up)")
     ap.add_argument("--python-hours", type=int, default=2, help="hours for the comparison with Python")
     ap.add_argument("--top", type=int, default=100, help="levels per side compared with each snapshot")
@@ -145,9 +146,9 @@ def main():
     import lobcpp
 
     base = a.parquet / a.symbol
-    stems = replay.hour_stems(base, a.max_files)
+    stems = replay.hour_stems(base, a.max_files, a.first, a.last)
     if not stems:
-        sys.exit(f"no Parquet files in {base}")
+        sys.exit(f"no Parquet files for these hours in {base}")
     t0 = time.perf_counter()
     hours = [bookdata.load_events(base, s) for s in stems]
     snaps = bookdata.load_snapshots(base, stems)

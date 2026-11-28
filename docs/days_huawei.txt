@@ -1,0 +1,14 @@
+﻿data\parquet\BTCUSDT: hours 2026-11-24T23 .. 2026-11-27T23 (73 files)
+
+day        hours    first     last   depth ev     trades sess holes   hole s max hole s  time cov  book cov gaps syncs checks mismatch unexpl crossed
+2026-11-24     1 23:02:12 23:59:59     27,424     54,205    2     1    692.2      692.2     3.21%     3.21%    0     2      4        0      0       0
+2026-11-25    24 00:00:00 23:59:59    861,527  5,362,523    6     5    134.8       53.6    99.84%    99.84%    0     5    141      344      0       0
+2026-11-26    24 00:00:00 23:59:59    856,854  4,163,873    8     7    156.1       65.2    99.82%    99.82%    0     7    139        0      0       0
+2026-11-27    24 00:00:00 23:59:59    818,033  4,818,341   29    28   4139.1     2376.6    95.21%    94.68%    0    27    126    1,171      0       0
+
+time cov    share of the UTC day between the first and the last depth event of a session
+book cov    share of the day with a synced book (from a sync to a sequence gap or the end of the session)
+hole s      time between sessions in the day; max hole s: the longest hole touching the day (whole length)
+checks      snapshot comparisons over the top 1000 levels per side; mismatch: mismatched levels
+            (untracked or unexplained, see replay.py); unexpl must be 0
+first/last  first and last depth event of the day; all times are receive times (PC clock), UTC
